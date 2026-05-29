@@ -1,0 +1,21 @@
+{
+  "c2s": {
+    "Join": "join",
+    "ChangeTrack": "changeTrack",
+    "SetVolume": "setVolume",
+    "TogglePlay": "togglePlay",
+    "UpdateSettings": "updateSettings"
+  },
+  "s2c": {
+    "State": "state",
+    "Activity": "activity",
+    "ActivityLog": "activityLog"
+  },
+  "limits": {
+    "reason": 500,
+    "url": 2048,
+    "nickname": 40,
+    "title": 200,
+    "password": 64
+  }
+}

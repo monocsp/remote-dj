@@ -44,6 +44,7 @@ export interface JoinPayload {
   roomCode: string;
   role: Role;
   nickname?: string;
+  password?: string;
 }
 
 export interface ChangeTrackPayload {
@@ -144,7 +145,7 @@ export function clampVolume(v: number): number {
 }
 
 /** Max accepted lengths for free-form string inputs (chars). */
-export const LIMITS = { reason: 500, url: 2048, nickname: 40, title: 200 } as const;
+export const LIMITS = { reason: 500, url: 2048, nickname: 40, title: 200, password: 64 } as const;
 
 /** True if `s` is null/undefined or no longer than `max` chars. */
 export function withinLimit(s: string | undefined, max: number): boolean {

@@ -6,6 +6,8 @@ import type { ActivityEntry, RoomState } from '@remote-dj/shared';
 export interface RoomRecord {
   state: RoomState;
   log: ActivityEntry[];
+  // Server-side only: optional room password. Never put on RoomState/broadcast.
+  password: string | null;
 }
 
 /**
@@ -14,7 +16,7 @@ export interface RoomRecord {
  * swapped for a database-backed one without touching call sites.
  */
 export interface RoomStore {
-  getOrCreate(roomCode: string): Promise<RoomRecord>;
+  getOrCreate(roomCode: string, initialPassword?: string | null): Promise<RoomRecord>;
   get(roomCode: string): Promise<RoomRecord | undefined>;
   patchState(roomCode: string, partial: Partial<RoomState>): Promise<RoomState>;
   appendActivity(roomCode: string, entry: ActivityEntry): Promise<void>;
@@ -40,10 +42,11 @@ function createInitialState(roomCode: string): RoomState {
 export class InMemoryRoomStore implements RoomStore {
   private rooms = new Map<string, RoomRecord>();
 
-  async getOrCreate(roomCode: string): Promise<RoomRecord> {
+  async getOrCreate(roomCode: string, initialPassword?: string | null): Promise<RoomRecord> {
     let record = this.rooms.get(roomCode);
     if (!record) {
-      record = { state: createInitialState(roomCode), log: [] };
+      // Password is only applied when creating a brand-new record.
+      record = { state: createInitialState(roomCode), log: [], password: initialPassword ?? null };
       this.rooms.set(roomCode, record);
     }
     return record;

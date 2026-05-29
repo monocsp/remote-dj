@@ -10,7 +10,8 @@
     "typecheck": "npm run typecheck --workspaces --if-present",
     "lint": "biome check . && npm run lint -w apps/web",
     "format": "biome check --write .",
-    "test": "vitest run"
+    "test": "vitest run",
+    "contract:export": "node scripts/export-contract.mjs"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",

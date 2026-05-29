@@ -46,7 +46,7 @@ type Role = 'player' | 'controller';
 
 | 이름 | 방향 | 페이로드 | ack / 결과 |
 | --- | --- | --- | --- |
-| `join` | C→S | `{ roomCode: string; role: Role; nickname?: string }` | `{ ok, error? }`; 성공 시 해당 소켓에 `state` + `activityLog` 전송 |
+| `join` | C→S | `{ roomCode: string; role: Role; nickname?: string; password?: string }` | `{ ok, error? }`; 성공 시 해당 소켓에 `state` + `activityLog` 전송. 방에 비밀번호가 설정돼 있으면 일치해야 함(아래 보안 규칙) |
 | `changeTrack` | C→S | `{ url: string; reason: string; title?: string }` | reason이 trim 후 빈 문자열이면 `{ ok:false, error }`; url에서 video id 파싱 실패 시 `{ ok:false, error }` |
 | `setVolume` | C→S | `{ volume: number; reason?: string }` | 서버가 `clampVolume` 으로 0..100 정수 보정 후 적용 |
 | `togglePlay` | C→S | `{ isPlaying: boolean; reason?: string }` | activity는 `play` 또는 `pause` 로 기록 |
@@ -104,6 +104,8 @@ interface ActivityEntry {
 | 음량 | `clampVolume(v)` = 반올림 후 0..100 클램프 | 자동 보정(에러 아님) |
 | 제어 권한 | role === `'controller'` | Player가 발행 시 ack `{ ok:false }` |
 | 그 외 사유 | 선택 — 비어있으면 `reason: null` 로 기록 | — |
+| 방 비밀번호 | 방에 비밀번호가 있으면 `join.password` 가 일치해야 함 | ack `{ ok:false, error:'wrong password' }` |
+| 입력 길이 | `withinLimit(s, LIMITS.*)` — reason 500 / url 2048 / title 200 / nickname 40 / password 64 | ack `{ ok:false, error:'... too long' }` |
 
 ### 공유 유틸 (packages/shared)
 
@@ -135,6 +137,19 @@ interface ActivityEntry {
 - `generateRoomCode()` 가 위 charset에서 6자를 무작위 생성.
 - QR 코드는 추후 add-on(룸 코드를 인코딩).
 
+## 보안 — 선택적 방 비밀번호
+
+- 방은 **선택적으로 비밀번호**를 가질 수 있다(설정하거나 생략 가능).
+- 방은 첫 `join` 시 생성되며, **최초 생성자**가 `join.password` 로 비밀번호를 설정한다(없으면 공개 방).
+  - 생성 시 `password` 가 비어있으면 → 공개 방(비밀번호 없음).
+  - 생성 시 `password` 가 있으면 → 그 값(trim)이 방 비밀번호가 된다.
+- 비밀번호가 설정된 **기존 방**에 입장할 때:
+  - `join.password` 가 방 비밀번호와 일치해야 한다 → 불일치/누락 시 ack `{ ok:false, error:'wrong password' }`.
+- 비밀번호가 없는 방은 `join.password` 를 무시하고 자유 입장.
+- 비밀번호는 **서버에만 보관**하며 `RoomState` 등으로 **절대 브로드캐스트하지 않는다**.
+- 길이 제한: `LIMITS.password = 64`.
+- Player/Controller 모두 동일 규칙 적용(방 단위 비밀번호).
+
 ## 권한 규칙 (누가 무엇을)
 
 | 동작 | Player | Controller |
@@ -148,7 +163,7 @@ interface ActivityEntry {
 
 ## 비범위 (추후)
 
-- 인증/세션 정책(현재는 익명 + 선택 닉네임)
+- 본격 인증/세션 정책(현재는 익명 + 선택 닉네임 + 선택적 방 비밀번호)
 - QR 코드 페어링
 - 영속 저장소(SQLite/Postgres) — 현재는 인메모리
 - 재생 큐/플레이리스트(현재는 단일 currentTrack)

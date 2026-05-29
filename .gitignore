@@ -10,6 +10,17 @@ build/
 out/
 *.tsbuildinfo
 
+# Playwright
+test-results/
+playwright-report/
+/apps/web/playwright/.cache/
+
+# Python (server QA harness)
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
 # Env & secrets
 .env
 .env.*

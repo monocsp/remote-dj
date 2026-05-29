@@ -9,6 +9,7 @@ import {
   useConnected,
   useCurrentTrack,
   useIsPlaying,
+  useLastError,
   useVolume,
 } from '@/lib/roomStore';
 import { useSearchParams } from 'next/navigation';
@@ -19,9 +20,16 @@ function ControllerInner() {
   const room = params.get('room') ?? '';
   const nick = params.get('nick') ?? undefined;
 
-  useEffect(() => connectRoom(room, 'controller', nick), [room, nick]);
+  useEffect(() => {
+    const password =
+      typeof window !== 'undefined'
+        ? (sessionStorage.getItem(`rdj:pw:${room}`) ?? undefined)
+        : undefined;
+    return connectRoom(room, 'controller', nick, password);
+  }, [room, nick]);
 
   const connected = useConnected();
+  const lastError = useLastError();
   const log = useActivityLog();
   const isPlaying = useIsPlaying();
   const track = useCurrentTrack();
@@ -32,6 +40,14 @@ function ControllerInner() {
   useEffect(() => {
     setVol(stateVolume);
   }, [stateVolume]);
+
+  if (lastError === 'wrong password') {
+    return (
+      <main className="flex min-h-screen items-center justify-center px-5 text-center">
+        <p className="text-base text-red-400">비밀번호가 올바르지 않습니다</p>
+      </main>
+    );
+  }
 
   return (
     <main className="mx-auto flex min-h-screen w-full max-w-md flex-col gap-5 px-5 py-8">

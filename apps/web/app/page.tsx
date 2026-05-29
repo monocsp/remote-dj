@@ -9,11 +9,19 @@ export default function LandingPage() {
   const [role, setRole] = useState<Role>('controller');
   const [roomCode, setRoomCode] = useState('');
   const [nickname, setNickname] = useState('');
+  const [password, setPassword] = useState('');
 
   function handleSubmit(e: FormEvent) {
     e.preventDefault();
     const code = roomCode.trim().toUpperCase();
     if (!code) return;
+    // Persist the (optional) password in sessionStorage keyed by room; never
+    // place it in the URL query.
+    const pw = password.trim();
+    if (typeof window !== 'undefined') {
+      if (pw) sessionStorage.setItem(`rdj:pw:${code}`, pw);
+      else sessionStorage.removeItem(`rdj:pw:${code}`);
+    }
     if (role === 'controller') {
       const nick = nickname.trim();
       const q = nick ? `&nick=${encodeURIComponent(nick)}` : '';
@@ -81,6 +89,21 @@ export default function LandingPage() {
               코드 생성
             </button>
           </div>
+        </div>
+
+        <div>
+          <label htmlFor="pw" className="mb-2 block text-sm font-medium text-neutral-300">
+            비밀번호 (선택)
+          </label>
+          <input
+            id="pw"
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            placeholder="없으면 공개 방"
+            maxLength={64}
+            className="w-full rounded-xl bg-neutral-800 px-4 py-4 text-base outline-none ring-emerald-500 focus:ring-2"
+          />
         </div>
 
         {role === 'controller' && (

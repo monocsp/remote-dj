@@ -127,7 +127,7 @@ export function createServer(store: RoomStore = new InMemoryRoomStore()): {
     }
 
     socket.on(C2S.Join, async (payload: JoinPayload, ack: AckFn) => {
-      const { roomCode, role, nickname } = payload ?? ({} as JoinPayload);
+      const { roomCode, role, nickname, password } = payload ?? ({} as JoinPayload);
       if (!roomCode || !role) {
         ack({ ok: false, error: 'roomCode and role required' });
         return;
@@ -135,6 +135,21 @@ export function createServer(store: RoomStore = new InMemoryRoomStore()): {
       if (!withinLimit(nickname, LIMITS.nickname)) {
         ack({ ok: false, error: 'nickname too long' });
         return;
+      }
+      if (!withinLimit(password, LIMITS.password)) {
+        ack({ ok: false, error: 'password too long' });
+        return;
+      }
+
+      // Optional room password. The room is created on first join; the first
+      // joiner sets the password (empty/absent → open room). Check BEFORE
+      // joining the socket / mutating socket.data / broadcasting.
+      const existing = await store.get(roomCode);
+      if (existing && existing.password !== null) {
+        if ((password ?? '').trim() !== existing.password) {
+          ack({ ok: false, error: 'wrong password' });
+          return;
+        }
       }
 
       // A socket lives in exactly one app room: leave any previous one first
@@ -154,7 +169,11 @@ export function createServer(store: RoomStore = new InMemoryRoomStore()): {
         await broadcastState(previousRoom);
       }
 
-      const record = await store.getOrCreate(roomCode);
+      // On create (room didn't exist before this join), the first joiner sets
+      // the optional password; an empty/absent value yields an open room.
+      const record = existing
+        ? await store.getOrCreate(roomCode)
+        : await store.getOrCreate(roomCode, password?.trim() || null);
 
       // Send current state (with recomputed presence) + full log to this socket.
       const sockets = await io.in(roomCode).fetchSockets();

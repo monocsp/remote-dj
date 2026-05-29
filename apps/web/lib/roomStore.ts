@@ -45,7 +45,12 @@ let refs = 0;
  * StrictMode double-mount thanks to the ref counter — only the first ref
  * creates the socket, only the last cleanup tears it down.
  */
-export function connectRoom(roomCode: string, role: Role, nickname?: string): () => void {
+export function connectRoom(
+  roomCode: string,
+  role: Role,
+  nickname?: string,
+  password?: string,
+): () => void {
   if (!roomCode) return () => {};
 
   refs += 1;
@@ -56,7 +61,7 @@ export function connectRoom(roomCode: string, role: Role, nickname?: string): ()
 
     s.on('connect', () => {
       store.setState({ connected: true });
-      s.emitWithAck(C2S.Join, { roomCode, role, nickname }).then((ack: Ack) => {
+      s.emitWithAck(C2S.Join, { roomCode, role, nickname, password }).then((ack: Ack) => {
         store.setState({ synced: ack.ok, lastError: ack.error ?? null });
       });
     });

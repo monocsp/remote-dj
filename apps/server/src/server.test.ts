@@ -174,6 +174,70 @@ describe('remote-dj server', () => {
     expect(ack.ok).toBe(false);
   });
 
+  it('rejects joining a password-protected room with the wrong password', async () => {
+    const room = 'ROOMPW';
+    const creator = connect();
+    const createAck = (await creator.emitWithAck(C2S.Join, {
+      roomCode: room,
+      role: 'controller',
+      password: 'secret',
+    })) as Ack;
+    expect(createAck.ok).toBe(true);
+
+    const second = connect();
+    const ack = (await second.emitWithAck(C2S.Join, {
+      roomCode: room,
+      role: 'controller',
+      password: 'nope',
+    })) as Ack;
+    expect(ack.ok).toBe(false);
+    expect(ack.error).toBe('wrong password');
+  });
+
+  it('allows joining a password-protected room with the correct password', async () => {
+    const room = 'ROOMPX';
+    const creator = connect();
+    await creator.emitWithAck(C2S.Join, {
+      roomCode: room,
+      role: 'controller',
+      password: 'secret',
+    });
+
+    const second = connect();
+    const ack = (await second.emitWithAck(C2S.Join, {
+      roomCode: room,
+      role: 'player',
+      password: 'secret',
+    })) as Ack;
+    expect(ack.ok).toBe(true);
+  });
+
+  it('ignores a password when joining an open room', async () => {
+    const room = 'ROOMOP';
+    const creator = connect();
+    await creator.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+
+    const second = connect();
+    const ack = (await second.emitWithAck(C2S.Join, {
+      roomCode: room,
+      role: 'controller',
+      password: 'whatever',
+    })) as Ack;
+    expect(ack.ok).toBe(true);
+  });
+
+  it('rejects an over-long password on join', async () => {
+    const room = 'ROOMPL';
+    const creator = connect();
+    const ack = (await creator.emitWithAck(C2S.Join, {
+      roomCode: room,
+      role: 'controller',
+      password: 'x'.repeat(LIMITS.password + 1),
+    })) as Ack;
+    expect(ack.ok).toBe(false);
+    expect(ack.error).toBe('password too long');
+  });
+
   it('bumps stateVersion after a successful setVolume', async () => {
     const room = 'ROOM06';
     const controller = connect();
