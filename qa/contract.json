@@ -8,7 +8,9 @@
     "EnqueueTrack": "enqueueTrack",
     "RemoveQueued": "removeQueued",
     "NextTrack": "nextTrack",
-    "TrackEnded": "trackEnded"
+    "TrackEnded": "trackEnded",
+    "SeekTo": "seekTo",
+    "Progress": "progress"
   },
   "s2c": {
     "State": "state",

@@ -37,6 +37,8 @@ function createInitialState(roomCode: string): RoomState {
     presence: { playerConnected: false, controllers: 0 },
     updatedAt: Date.now(),
     stateVersion: 0,
+    progress: null,
+    lastSeek: null,
   };
 }
 

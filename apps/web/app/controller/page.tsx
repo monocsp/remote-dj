@@ -11,11 +11,21 @@ import {
   useCurrentTrack,
   useIsPlaying,
   useLastError,
+  useProgress,
   useQueue,
   useVolume,
 } from '@/lib/roomStore';
 import { useSearchParams } from 'next/navigation';
 import { Suspense, useEffect, useState } from 'react';
+
+/** Format a number of seconds as mm:ss. */
+function formatTime(seconds: number): string {
+  const safe = Number.isFinite(seconds) && seconds > 0 ? seconds : 0;
+  const total = Math.floor(safe);
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return `${m}:${s.toString().padStart(2, '0')}`;
+}
 
 function ControllerInner() {
   const params = useSearchParams();
@@ -37,12 +47,22 @@ function ControllerInner() {
   const track = useCurrentTrack();
   const queue = useQueue();
   const stateVolume = useVolume();
+  const progress = useProgress();
 
   // Local mirror of the volume slider; synced to authoritative state.
   const [vol, setVol] = useState(100);
   useEffect(() => {
     setVol(stateVolume);
   }, [stateVolume]);
+
+  // Local mirror of the seek bar; synced to the latest player-reported position.
+  const [seekPos, setSeekPos] = useState(0);
+  const progressCurrent = progress?.currentTime ?? 0;
+  useEffect(() => {
+    setSeekPos(progressCurrent);
+  }, [progressCurrent]);
+  // Duration when the player has reported real progress, else null (no bar).
+  const duration = progress != null && progress.duration > 0 ? progress.duration : null;
 
   if (lastError === 'wrong password') {
     return (
@@ -134,6 +154,29 @@ function ControllerInner() {
 
       {/* volume + play/pause */}
       <section className="flex flex-col gap-4 rounded-xl bg-neutral-900 p-4">
+        <div>
+          <div className="mb-2 flex items-center justify-between text-sm">
+            <span className="text-neutral-300">탐색</span>
+            {duration != null ? (
+              <span className="font-mono text-neutral-400">
+                {formatTime(seekPos)} / {formatTime(duration)}
+              </span>
+            ) : (
+              <span className="text-neutral-600">진행 정보 없음</span>
+            )}
+          </div>
+          {duration != null && (
+            <input
+              type="range"
+              min={0}
+              max={duration}
+              value={Math.min(seekPos, duration)}
+              onChange={(e) => setSeekPos(Number(e.target.value))}
+              onPointerUp={() => void actions.seekTo(seekPos)}
+              className="w-full accent-emerald-500"
+            />
+          )}
+        </div>
         <div>
           <div className="mb-2 flex items-center justify-between text-sm">
             <span className="text-neutral-300">음량</span>

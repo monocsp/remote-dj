@@ -11,6 +11,7 @@ const TYPE_LABEL: Record<ActivityType, string> = {
   enqueue: '대기열 추가',
   dequeue: '대기열 제거',
   skip: '다음 곡',
+  seek: '탐색',
 };
 
 function relativeTime(ts: number): string {

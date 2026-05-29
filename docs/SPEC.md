@@ -55,6 +55,8 @@ type Role = 'player' | 'controller';
 | `removeQueued` | C→S | `{ index: number; reason?: string }` | `index` 가 `[0, queue.length)` 정수가 아니면 `{ ok:false, error:'invalid index' }`. activity `dequeue` |
 | `nextTrack` | C→S | `{ reason?: string }` | 큐가 있으면 맨 앞 곡을 `currentTrack` 으로 승격(`isPlaying:true`), activity `skip`. 큐가 비어있으면 `{ ok:true }` no-op. **사유 선택** |
 | `trackEnded` | C→S | `{}` | **Player 전용**(controller가 발행 시 `{ ok:false, error:'player only' }`). 자동 next처럼 동작: 큐 있으면 승격(activity `skip`, detail `{auto:true}`), 비어있으면 `isPlaying:false` |
+| `seekTo` | C→S | `{ seconds: number; reason?: string }` | **Controller 전용**. `seconds` 가 유한수 `>= 0` 가 아니면 `{ ok:false, error:'invalid seconds' }`. `lastSeek` 갱신, activity `seek`, detail `{seconds}`. **사유 선택** |
+| `progress` | C→S | `{ currentTime: number; duration: number }` | **Player 전용**(controller가 발행 시 `{ ok:false, error:'player only' }`). `currentTime`/`duration` 이 유한수 `>= 0` 가 아니면 `{ ok:false, error:'invalid progress' }`. `progress` 갱신 + 브로드캐스트. **로그 기록 안 함**(고빈도) |
 | `state` | S→C | `RoomState` | join 직후 + 모든 변경 후 브로드캐스트 |
 | `activity` | S→C | `ActivityEntry` | 신규 항목 1건 |
 | `activityLog` | S→C | `ActivityEntry[]` | join 직후 전체 로그 |
@@ -86,11 +88,15 @@ interface RoomState {
   settings: RoomSettings;
   presence: { playerConnected: boolean; controllers: number };
   updatedAt: number;       // epoch ms
+  // 최신 Player 보고 재생 위치(첫 progress 보고 전엔 null)
+  progress: { currentTime: number; duration: number; ts: number } | null;
+  // Player가 적용해야 할 최신 seek 명령(초기 null)
+  lastSeek: { seconds: number; ts: number } | null;
 }
 
 type ActivityType =
   | 'track_change' | 'volume' | 'play' | 'pause' | 'settings'
-  | 'enqueue' | 'dequeue' | 'skip';
+  | 'enqueue' | 'dequeue' | 'skip' | 'seek';
 
 interface ActivityEntry {
   id: string;
@@ -116,6 +122,21 @@ interface ActivityEntry {
 - **사유 정책**: `enqueueTrack` / `nextTrack` / `trackEnded` 의 사유는 **선택**이다(비면 `reason: null` 로 기록). 반면 **`changeTrack` 은 사유 필수**(`validateReason`)이며, `currentTrack` 만 설정하고 **큐를 건드리지 않는다** — 큐 모델과 독립적이다.
 - **`trackEnded` 는 Player 전용**이다: controller가 발행하면 ack `{ ok:false, error:'player only' }`. 그 외 큐 제어 이벤트는 모두 Controller 전용이다.
 - 신규 방은 `queue: []` 로 시작한다.
+
+## 탐색(Seek) / 진행상황(Progress)
+
+방은 재생 위치 관련 두 필드를 가진다: `RoomState.progress`(Player가 보고한 현재 위치)와
+`RoomState.lastSeek`(Player가 적용해야 할 최신 탐색 명령). 신규 방은 둘 다 `null` 로 시작한다.
+
+| 동작 | 발행자 | 사유 | 효과 |
+| --- | --- | --- | --- |
+| `seekTo` | **Controller 전용** | **선택** | `seconds` 가 유한수 `>= 0` 인지 검증(아니면 `invalid seconds`). `lastSeek = { seconds, ts }` 로 갱신, activity `seek`, detail `{seconds}`, 브로드캐스트 |
+| `progress` | **Player 전용** | 없음 | `currentTime`/`duration` 이 유한수 `>= 0` 인지 검증(아니면 `invalid progress`). `progress = { currentTime, duration, ts }` 로 갱신 + 브로드캐스트 |
+
+- **`progress` 는 Player 전용**이며 **Activity Log에 기록하지 않는다** — 고빈도 보고이므로 로그를 오염시키지 않는다(Player는 ~2s로 throttle). controller가 발행하면 ack `{ ok:false, error:'player only' }`.
+- **`seekTo` 는 Controller 전용**이며 사유는 선택(비면 `reason: null`). player가 발행하면 ack `{ ok:false, error:'controllers only' }`.
+- Player는 수신한 `state.lastSeek` 를 보고 해당 위치로 탐색을 적용한다.
+- 매 `progress` 보고는 `stateVersion` 을 증가시키고 `state` 를 브로드캐스트한다(허용 — Player가 throttle).
 
 ## 검증 규칙
 
@@ -186,6 +207,8 @@ interface ActivityEntry {
 | `removeQueued` | X | O |
 | `nextTrack` | X | O |
 | `trackEnded` | **O** | X |
+| `seekTo` | X | O |
+| `progress` | **O** | X |
 
 ## 비범위 (추후)
 

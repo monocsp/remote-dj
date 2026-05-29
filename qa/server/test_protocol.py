@@ -23,7 +23,9 @@ from contract import (
     JOIN,
     LIMITS,
     NEXT_TRACK,
+    PROGRESS,
     REMOVE_QUEUED,
+    SEEK_TO,
     SET_VOLUME,
     TOGGLE_PLAY,
     TRACK_ENDED,
@@ -371,5 +373,74 @@ def test_QUEUE_12_track_ended_player_only(make_client):
     room = room_code()
     assert c.join(room)["ok"] is True
     ack = c.call(TRACK_ENDED, {})
+    assert ack["ok"] is False
+    assert ack.get("error") == "player only"
+
+
+# ── SEEK-01/02: seekTo updates lastSeek + logs a seek (reason optional) ─────
+def test_SEEK_01_02_seek_updates_last_seek_and_logs(make_client):
+    c = make_client()
+    room = room_code()
+    c.join(room)
+    c.states.clear()
+    c.activities.clear()
+    ack = c.call(SEEK_TO, {"seconds": 42})  # no reason
+    assert ack["ok"] is True
+    c.wait_event(3.0)
+    st = c.last_state()
+    assert st is not None
+    assert st["lastSeek"]["seconds"] == 42
+    seeks = [a for a in c.activities if a["type"] == "seek"]
+    assert seeks  # SEEK-01: a seek activity is logged
+    assert seeks[-1].get("detail", {}).get("seconds") == 42
+    assert seeks[-1]["reason"] is None  # SEEK-02: reason optional → null
+
+
+# ── SEEK-03: negative seconds rejected, lastSeek unchanged ──────────────────
+def test_SEEK_03_negative_seconds_rejected(make_client):
+    c = make_client()
+    room = room_code()
+    c.join(room)
+    ack = c.call(SEEK_TO, {"seconds": -5})
+    assert ack["ok"] is False
+    assert ack.get("error") == "invalid seconds"
+
+
+# ── SEEK-05: seekTo is controllers only (player rejected) ───────────────────
+def test_SEEK_05_seek_controllers_only(make_client):
+    p = make_client()
+    room = room_code()
+    assert p.join(room, role="player")["ok"] is True
+    ack = p.call(SEEK_TO, {"seconds": 10})
+    assert ack["ok"] is False
+
+
+# ── SEEK-06: a Player's progress updates state.progress, no activity entry ──
+def test_SEEK_06_progress_updates_state_no_log(make_client):
+    controller = make_client()
+    player = make_client()
+    room = room_code()
+    controller.join(room)
+    player.join(room, role="player")
+    controller.states.clear()
+    controller.activities.clear()
+    ack = player.call(PROGRESS, {"currentTime": 12, "duration": 200})
+    assert ack["ok"] is True
+    controller.wait_event(3.0)
+    st = controller.last_state()
+    assert st is not None
+    assert st["progress"]["currentTime"] == 12
+    assert st["progress"]["duration"] == 200
+    # High-frequency reports are NOT logged.
+    assert all(a["type"] != "seek" for a in controller.activities)
+    assert controller.activities == []
+
+
+# ── SEEK-08: progress is player only (controller rejected) ──────────────────
+def test_SEEK_08_progress_player_only(make_client):
+    c = make_client()
+    room = room_code()
+    assert c.join(room)["ok"] is True
+    ack = c.call(PROGRESS, {"currentTime": 1, "duration": 100})
     assert ack["ok"] is False
     assert ack.get("error") == "player only"

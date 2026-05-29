@@ -127,6 +127,14 @@ export const actions = {
     if (!socket) return Promise.resolve(DISCONNECTED_ACK);
     return socket.emitWithAck(C2S.TrackEnded, {});
   },
+  seekTo(seconds: number, reason?: string): Promise<Ack> {
+    if (!socket) return Promise.resolve(DISCONNECTED_ACK);
+    return socket.emitWithAck(C2S.SeekTo, { seconds, reason });
+  },
+  progress(currentTime: number, duration: number): Promise<Ack> {
+    if (!socket) return Promise.resolve(DISCONNECTED_ACK);
+    return socket.emitWithAck(C2S.Progress, { currentTime, duration });
+  },
 } as const;
 
 // ── Fine-grained selector hooks ──────────────────────────────────────────────
@@ -137,5 +145,9 @@ export const useCurrentTrack = () => useStore(store, (s) => s.state?.currentTrac
 export const useIsPlaying = () => useStore(store, (s) => s.state?.isPlaying ?? false);
 export const useVolume = () => useStore(store, (s) => s.state?.volume ?? 100);
 export const useQueue = () => useStore(store, (s) => s.state?.queue ?? EMPTY_QUEUE);
+// Returns the stored nullable object reference directly — stable until the
+// server pushes a new RoomState — so it's safe for useSyncExternalStore.
+export const useProgress = () => useStore(store, (s) => s.state?.progress ?? null);
+export const useLastSeek = () => useStore(store, (s) => s.state?.lastSeek ?? null);
 export const useActivityLog = () => useStore(store, (s) => s.log);
 export const useLastError = () => useStore(store, (s) => s.lastError);

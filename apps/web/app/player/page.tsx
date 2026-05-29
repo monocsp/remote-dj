@@ -7,6 +7,7 @@ import {
   useCurrentTrack,
   useIsPlaying,
   useLastError,
+  useLastSeek,
   useVolume,
 } from '@/lib/roomStore';
 import { useSearchParams } from 'next/navigation';
@@ -21,6 +22,9 @@ interface YTPlayer {
   playVideo(): void;
   pauseVideo(): void;
   setVolume(volume: number): void;
+  getCurrentTime(): number;
+  getDuration(): number;
+  seekTo(seconds: number, allowSeekAhead: boolean): void;
 }
 interface YTStateChangeEvent {
   data: number;
@@ -66,12 +70,15 @@ function PlayerInner() {
   const currentTrack = useCurrentTrack();
   const stateIsPlaying = useIsPlaying();
   const stateVolume = useVolume();
+  const lastSeek = useLastSeek();
 
   const containerRef = useRef<HTMLDivElement | null>(null);
   const playerRef = useRef<YTPlayer | null>(null);
   const readyRef = useRef(false);
   // Guard so a single playback end reports trackEnded at most once.
   const endedRef = useRef(false);
+  // Last applied seek timestamp — so we only seek when the server pushes a new one.
+  const lastSeekTsRef = useRef<number | null>(null);
 
   // Inject the IFrame API script once and build the player.
   useEffect(() => {
@@ -136,6 +143,31 @@ function PlayerInner() {
     if (!playerRef.current || !readyRef.current) return;
     playerRef.current.setVolume(volume);
   }, [volume]);
+
+  // Report playback progress (~every 2s) while a track is loaded and ready.
+  useEffect(() => {
+    if (!trackId) return;
+    const interval = setInterval(() => {
+      const p = playerRef.current;
+      if (!p || !readyRef.current) return;
+      const duration = p.getDuration();
+      const currentTime = p.getCurrentTime();
+      // Skip until the player has real numbers (duration 0/NaN = not loaded yet).
+      if (!Number.isFinite(duration) || duration <= 0 || !Number.isFinite(currentTime)) return;
+      void actions.progress(currentTime, duration);
+    }, 2000);
+    return () => clearInterval(interval);
+  }, [trackId]);
+
+  // Apply controller seeks: only when the server pushes a NEW lastSeek (ts changes).
+  useEffect(() => {
+    if (!lastSeek) return;
+    if (lastSeekTsRef.current === lastSeek.ts) return;
+    lastSeekTsRef.current = lastSeek.ts;
+    const p = playerRef.current;
+    if (!p || !readyRef.current) return;
+    p.seekTo(lastSeek.seconds, true);
+  }, [lastSeek]);
 
   if (lastError === 'wrong password') {
     return (

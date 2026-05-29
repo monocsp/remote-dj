@@ -238,6 +238,21 @@ describe('remote-dj server', () => {
     expect(ack.error).toBe('password too long');
   });
 
+  it('propagates lastSeek to OTHER room members (separate observer)', async () => {
+    const room = 'ROOMSK';
+    const observer = connect();
+    const controller = connect();
+    await observer.emitWithAck(C2S.Join, { roomCode: room, role: 'player' });
+    await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+
+    const obsState = waitFor<RoomState>(observer, S2C.State, (s) => s.lastSeek?.seconds === 37);
+    const ack = (await controller.emitWithAck(C2S.SeekTo, { seconds: 37 })) as Ack;
+    expect(ack.ok).toBe(true);
+
+    const s = await obsState;
+    expect(s.lastSeek?.seconds).toBe(37);
+  });
+
   it('bumps stateVersion after a successful setVolume', async () => {
     const room = 'ROOM06';
     const controller = connect();
@@ -367,6 +382,87 @@ describe('remote-dj server', () => {
     await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
 
     const ack = (await controller.emitWithAck(C2S.TrackEnded, {})) as Ack;
+    expect(ack.ok).toBe(false);
+    expect(ack.error).toBe('player only');
+  });
+
+  it('seekTo by a controller broadcasts lastSeek and logs a seek activity', async () => {
+    const room = 'SEEK1';
+    const controller = connect();
+    const player = connect();
+    await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+    await player.emitWithAck(C2S.Join, { roomCode: room, role: 'player' });
+
+    const hasSeek = (s: RoomState) => s.lastSeek?.seconds === 42;
+    const isSeek = (a: ActivityEntry) => a.type === 'seek';
+    const playerState = waitFor<RoomState>(player, S2C.State, hasSeek);
+    const playerActivity = waitFor<ActivityEntry>(player, S2C.Activity, isSeek);
+
+    const ack = (await controller.emitWithAck(C2S.SeekTo, { seconds: 42 })) as Ack;
+    expect(ack.ok).toBe(true);
+
+    const [ps, pa] = await Promise.all([playerState, playerActivity]);
+    expect(ps.lastSeek?.seconds).toBe(42);
+    expect(pa.type).toBe('seek');
+    expect((pa.detail as { seconds: number }).seconds).toBe(42);
+  });
+
+  it('rejects seekTo with negative seconds', async () => {
+    const room = 'SEEK2';
+    const controller = connect();
+    await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+
+    const ack = (await controller.emitWithAck(C2S.SeekTo, { seconds: -5 })) as Ack;
+    expect(ack.ok).toBe(false);
+    expect(ack.error).toBe('invalid seconds');
+  });
+
+  it('rejects seekTo from a player (controller-only)', async () => {
+    const room = 'SEEK3';
+    const player = connect();
+    await player.emitWithAck(C2S.Join, { roomCode: room, role: 'player' });
+
+    const ack = (await player.emitWithAck(C2S.SeekTo, { seconds: 10 })) as Ack;
+    expect(ack.ok).toBe(false);
+  });
+
+  it('progress from a player updates state.progress and logs no activity', async () => {
+    const room = 'SEEK4';
+    const controller = connect();
+    const player = connect();
+    await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+    await player.emitWithAck(C2S.Join, { roomCode: room, role: 'player' });
+
+    // Progress must NOT produce an activity entry.
+    let sawActivity = false;
+    controller.on(S2C.Activity, () => {
+      sawActivity = true;
+    });
+
+    const hasProgress = (s: RoomState) => s.progress?.currentTime === 12;
+    const controllerState = waitFor<RoomState>(controller, S2C.State, hasProgress);
+
+    const ack = (await player.emitWithAck(C2S.Progress, {
+      currentTime: 12,
+      duration: 200,
+    })) as Ack;
+    expect(ack.ok).toBe(true);
+
+    const cs = await controllerState;
+    expect(cs.progress?.currentTime).toBe(12);
+    expect(cs.progress?.duration).toBe(200);
+    expect(sawActivity).toBe(false);
+  });
+
+  it('rejects progress from a controller (player-only)', async () => {
+    const room = 'SEEK5';
+    const controller = connect();
+    await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+
+    const ack = (await controller.emitWithAck(C2S.Progress, {
+      currentTime: 1,
+      duration: 100,
+    })) as Ack;
     expect(ack.ok).toBe(false);
     expect(ack.error).toBe('player only');
   });

@@ -9,11 +9,13 @@ import {
   type JoinPayload,
   LIMITS,
   type NextTrackPayload,
+  type ProgressPayload,
   type RemoveQueuedPayload,
   type Role,
   type RoomSettings,
   type RoomState,
   S2C,
+  type SeekToPayload,
   type SetVolumePayload,
   type TogglePlayPayload,
   type Track,
@@ -392,6 +394,48 @@ export function createServer(store: RoomStore = new InMemoryRoomStore()): {
       const [head, ...rest] = queue;
       await store.patchState(room, { currentTrack: head, queue: rest, isPlaying: true });
       await recordActivity('skip', null, { auto: true });
+      ack({ ok: true });
+      await broadcastState(room);
+    });
+
+    socket.on(C2S.SeekTo, async (payload: SeekToPayload, ack: AckFn) => {
+      const room = requireController(ack);
+      if (!room) return;
+      const { seconds, reason } = payload ?? ({} as SeekToPayload);
+      if (!withinLimit(reason, LIMITS.reason)) {
+        ack({ ok: false, error: 'input too long' });
+        return;
+      }
+      if (typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds < 0) {
+        ack({ ok: false, error: 'invalid seconds' });
+        return;
+      }
+
+      await store.patchState(room, { lastSeek: { seconds, ts: Date.now() } });
+      await recordActivity('seek', reason?.trim() || null, { seconds });
+      ack({ ok: true });
+      await broadcastState(room);
+    });
+
+    socket.on(C2S.Progress, async (payload: ProgressPayload, ack: AckFn) => {
+      const room = requirePlayer(ack);
+      if (!room) return;
+      const { currentTime, duration } = payload ?? ({} as ProgressPayload);
+      if (
+        typeof currentTime !== 'number' ||
+        !Number.isFinite(currentTime) ||
+        currentTime < 0 ||
+        typeof duration !== 'number' ||
+        !Number.isFinite(duration) ||
+        duration < 0
+      ) {
+        ack({ ok: false, error: 'invalid progress' });
+        return;
+      }
+
+      // High-frequency report: update state but DO NOT log an activity entry
+      // (would spam the log; Player throttles to ~2s).
+      await store.patchState(room, { progress: { currentTime, duration, ts: Date.now() } });
       ack({ ok: true });
       await broadcastState(room);
     });

@@ -27,6 +27,10 @@ export interface RoomState {
   presence: { playerConnected: boolean; controllers: number };
   updatedAt: number; // epoch ms
   stateVersion: number; // monotonic counter, bumped on every patch; lets clients detect/resync missed updates
+  // Latest player-reported playback position; null until the first progress report.
+  progress: { currentTime: number; duration: number; ts: number } | null;
+  // Latest seek command the Player should apply; null initially.
+  lastSeek: { seconds: number; ts: number } | null;
 }
 
 export type ActivityType =
@@ -37,7 +41,8 @@ export type ActivityType =
   | 'settings'
   | 'enqueue'
   | 'dequeue'
-  | 'skip';
+  | 'skip'
+  | 'seek';
 
 export interface ActivityEntry {
   id: string;
@@ -95,6 +100,18 @@ export interface NextTrackPayload {
 // Player status report: the current track finished playing. No fields.
 export type TrackEndedPayload = Record<string, never>;
 
+// Controller asks the Player to seek to an absolute position (seconds).
+export interface SeekToPayload {
+  seconds: number;
+  reason?: string;
+}
+
+// Player reports its current playback position. High-frequency; NOT logged.
+export interface ProgressPayload {
+  currentTime: number;
+  duration: number;
+}
+
 export interface Ack {
   ok: boolean;
   error?: string;
@@ -111,6 +128,8 @@ export const C2S = {
   RemoveQueued: 'removeQueued',
   NextTrack: 'nextTrack',
   TrackEnded: 'trackEnded',
+  SeekTo: 'seekTo',
+  Progress: 'progress',
 } as const;
 
 export const S2C = {

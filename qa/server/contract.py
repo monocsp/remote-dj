@@ -39,6 +39,8 @@ ENQUEUE_TRACK = C2S["EnqueueTrack"]
 REMOVE_QUEUED = C2S["RemoveQueued"]
 NEXT_TRACK = C2S["NextTrack"]
 TRACK_ENDED = C2S["TrackEnded"]
+SEEK_TO = C2S["SeekTo"]
+PROGRESS = C2S["Progress"]
 
 EV_STATE = S2C["State"]
 EV_ACTIVITY = S2C["Activity"]

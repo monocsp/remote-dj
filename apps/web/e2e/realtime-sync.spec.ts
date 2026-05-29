@@ -33,7 +33,15 @@ async function mockYouTube(context: BrowserContext): Promise<void> {
   await context.addInitScript(() => {
     // biome-ignore lint/suspicious/noExplicitAny: test stub
     const w = window as any;
-    w.__ytCalls = { loadVideoById: [], setVolume: [], playVideo: 0, pauseVideo: 0 };
+    w.__ytCalls = {
+      loadVideoById: [],
+      setVolume: [],
+      playVideo: 0,
+      pauseVideo: 0,
+      seekTo: [],
+    };
+    // Stored playback position the Player reports as progress.
+    w.__ytTime = 12;
     class FakePlayer {
       constructor(_el: HTMLElement, opts: { events?: { onReady?: () => void } }) {
         // Signal ready on next tick so the page wires up state effects.
@@ -50,6 +58,16 @@ async function mockYouTube(context: BrowserContext): Promise<void> {
       }
       pauseVideo() {
         w.__ytCalls.pauseVideo += 1;
+      }
+      getCurrentTime() {
+        return w.__ytTime;
+      }
+      getDuration() {
+        return 100;
+      }
+      seekTo(sec: number, allow: boolean) {
+        w.__ytCalls.seekTo.push({ sec, allow });
+        w.__ytTime = sec;
       }
     }
     w.YT = { Player: FakePlayer };
@@ -207,4 +225,46 @@ test('PAIR-06 wrong-password rejection (contract via socket)', async () => {
   const wrong = await rawJoin('nope');
   expect(wrong.ok).toBe(false);
   expect(wrong.error).toBe('wrong password');
+});
+
+// SEEK-06/01 (web slice): a mocked Player reports progress so the Controller's
+// 탐색 bar appears, and a Controller seek is accepted and logged. The server-side
+// propagation of lastSeek to other clients + the Player applying it are covered
+// reliably by the server observer test (server.test.ts) and the Python harness;
+// here we verify the web UI path (progress → bar → seek → activity).
+test('SEEK-06/01 progress shows seek bar + controller seek is logged', async ({ browser }) => {
+  const room = uniqueRoom();
+
+  const playerCtx = await browser.newContext();
+  await mockYouTube(playerCtx);
+  const ctxA = await browser.newContext();
+
+  const player = await openRoom(playerCtx, 'player', room);
+  const a = await openRoom(ctxA, 'controller', room, 'A');
+
+  // Load + start a track so the Player begins reporting progress (~2s interval).
+  await changeTrack(a, VALID_URL, '탐색 테스트');
+
+  // Player recorded the load (track is now playing).
+  await expect
+    .poll(
+      // biome-ignore lint/suspicious/noExplicitAny: test stub
+      async () => player.evaluate(() => (window as any).__ytCalls?.loadVideoById ?? []),
+      { timeout: 15_000 },
+    )
+    .toContain(VALID_ID);
+
+  // SEEK-06: progress propagates → Controller's 탐색 range input appears.
+  const seekSection = a.locator('section', { hasText: '탐색' });
+  const seekRange = seekSection.locator('input[type="range"]').first();
+  await expect(seekRange).toBeVisible({ timeout: 20_000 });
+
+  // SEEK-01: a real pointer gesture on the slider issues a seek; the controller's
+  // own Activity Log then shows the seek entry (UI → server path).
+  await seekRange.click();
+  await expect(a.locator('section', { hasText: 'Activity Log' }).getByText('탐색')).toBeVisible({
+    timeout: 10_000,
+  });
+
+  await Promise.all([playerCtx.close(), ctxA.close()]);
 });
