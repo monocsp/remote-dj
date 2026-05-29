@@ -121,7 +121,7 @@ interface ActivityEntry {
 | id | ts | actor | type | reason | detail |
 | --- | --- | --- | --- | --- | --- |
 | a1 | 1748... | null | `track_change` | "분위기 띄우려고" | `{ title, url, id }` |
-| a2 | 1748... | "철수" | `volume` | "통화 중이라 줄임" | `{ from: 80, to: 30 }` |
+| a2 | 1748... | "철수" | `volume` | "통화 중이라 줄임" | `{ volume: 30 }` |
 | a3 | 1748... | null | `pause` | null | — |
 | a4 | 1748... | "영희" | `settings` | null | `{ allowAnonymous: false }` |
 

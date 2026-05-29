@@ -6,6 +6,7 @@ import {
   C2S,
   type ChangeTrackPayload,
   type JoinPayload,
+  LIMITS,
   type Role,
   type RoomSettings,
   type RoomState,
@@ -17,6 +18,7 @@ import {
   clampVolume,
   parseYouTubeId,
   validateReason,
+  withinLimit,
 } from '@remote-dj/shared';
 import { nanoid } from 'nanoid';
 import { Server } from 'socket.io';
@@ -29,6 +31,9 @@ interface SocketData {
 }
 
 type AckFn = (res: Ack) => void;
+
+/** Grace period before an empty room is deleted, allowing quick reconnects. */
+const ROOM_TTL_MS = 5 * 60_000;
 
 /**
  * Wire an HTTP server + Socket.IO Server with all room handlers.
@@ -51,6 +56,18 @@ export function createServer(store: RoomStore = new InMemoryRoomStore()): {
   const io = new Server(httpServer, {
     cors: { origin: process.env.CORS_ORIGIN ?? '*' },
   });
+
+  // Pending deletions for rooms that went empty; cancelled if someone rejoins.
+  const pendingDeletions = new Map<string, NodeJS.Timeout>();
+
+  /** Cancel any scheduled deletion for a room (e.g. on rejoin). */
+  function cancelDeletion(roomCode: string): void {
+    const timer = pendingDeletions.get(roomCode);
+    if (timer) {
+      clearTimeout(timer);
+      pendingDeletions.delete(roomCode);
+    }
+  }
 
   /** Recompute presence from connected sockets and broadcast `state`. */
   async function broadcastState(roomCode: string): Promise<void> {
@@ -115,11 +132,27 @@ export function createServer(store: RoomStore = new InMemoryRoomStore()): {
         ack({ ok: false, error: 'roomCode and role required' });
         return;
       }
+      if (!withinLimit(nickname, LIMITS.nickname)) {
+        ack({ ok: false, error: 'nickname too long' });
+        return;
+      }
 
+      // A socket lives in exactly one app room: leave any previous one first
+      // and refresh its presence so it no longer counts this socket.
+      const previousRoom = data.roomCode;
+      if (previousRoom && previousRoom !== roomCode) {
+        await socket.leave(previousRoom);
+      }
+
+      cancelDeletion(roomCode);
       await socket.join(roomCode);
       data.roomCode = roomCode;
       data.role = role;
       data.nickname = nickname ?? null;
+
+      if (previousRoom && previousRoom !== roomCode) {
+        await broadcastState(previousRoom);
+      }
 
       const record = await store.getOrCreate(roomCode);
 
@@ -148,6 +181,14 @@ export function createServer(store: RoomStore = new InMemoryRoomStore()): {
       if (!room) return;
       const { url, reason, title } = payload ?? ({} as ChangeTrackPayload);
 
+      if (
+        !withinLimit(url, LIMITS.url) ||
+        !withinLimit(reason, LIMITS.reason) ||
+        !withinLimit(title, LIMITS.title)
+      ) {
+        ack({ ok: false, error: 'input too long' });
+        return;
+      }
       if (!validateReason(reason ?? '')) {
         ack({ ok: false, error: 'reason required' });
         return;
@@ -174,6 +215,10 @@ export function createServer(store: RoomStore = new InMemoryRoomStore()): {
       const room = requireController(ack);
       if (!room) return;
       const { volume, reason } = payload ?? ({} as SetVolumePayload);
+      if (!withinLimit(reason, LIMITS.reason)) {
+        ack({ ok: false, error: 'input too long' });
+        return;
+      }
       const clamped = clampVolume(volume);
 
       await store.patchState(room, { volume: clamped });
@@ -186,6 +231,10 @@ export function createServer(store: RoomStore = new InMemoryRoomStore()): {
       const room = requireController(ack);
       if (!room) return;
       const { isPlaying, reason } = payload ?? ({} as TogglePlayPayload);
+      if (!withinLimit(reason, LIMITS.reason)) {
+        ack({ ok: false, error: 'input too long' });
+        return;
+      }
 
       await store.patchState(room, { isPlaying });
       await recordActivity(isPlaying ? 'play' : 'pause', reason?.trim() || null);
@@ -197,6 +246,10 @@ export function createServer(store: RoomStore = new InMemoryRoomStore()): {
       const room = requireController(ack);
       if (!room) return;
       const { settings, reason } = payload ?? ({} as UpdateSettingsPayload);
+      if (!withinLimit(reason, LIMITS.reason)) {
+        ack({ ok: false, error: 'input too long' });
+        return;
+      }
 
       const record = await store.getOrCreate(room);
       const merged: RoomSettings = { ...record.state.settings, ...settings };
@@ -207,8 +260,18 @@ export function createServer(store: RoomStore = new InMemoryRoomStore()): {
     });
 
     socket.on('disconnect', async () => {
-      if (data.roomCode) {
-        await broadcastState(data.roomCode);
+      const room = data.roomCode;
+      if (!room) return;
+      await broadcastState(room);
+
+      // If the room is now empty, schedule its deletion after a grace period.
+      const remaining = (await io.in(room).fetchSockets()).length;
+      if (remaining === 0 && !pendingDeletions.has(room)) {
+        const timer = setTimeout(() => {
+          pendingDeletions.delete(room);
+          void store.deleteRoom(room);
+        }, ROOM_TTL_MS);
+        pendingDeletions.set(room, timer);
       }
     });
   });

@@ -18,7 +18,11 @@ export interface RoomStore {
   get(roomCode: string): Promise<RoomRecord | undefined>;
   patchState(roomCode: string, partial: Partial<RoomState>): Promise<RoomState>;
   appendActivity(roomCode: string, entry: ActivityEntry): Promise<void>;
+  deleteRoom(roomCode: string): Promise<void>;
 }
+
+/** Max activity entries retained per room; oldest are dropped past this. */
+const MAX_LOG = 200;
 
 function createInitialState(roomCode: string): RoomState {
   return {
@@ -29,6 +33,7 @@ function createInitialState(roomCode: string): RoomState {
     settings: { allowAnonymous: true },
     presence: { playerConnected: false, controllers: 0 },
     updatedAt: Date.now(),
+    stateVersion: 0,
   };
 }
 
@@ -56,6 +61,7 @@ export class InMemoryRoomStore implements RoomStore {
       // roomCode is immutable for a record
       roomCode: record.state.roomCode,
       updatedAt: Date.now(),
+      stateVersion: record.state.stateVersion + 1,
     };
     return record.state;
   }
@@ -63,5 +69,13 @@ export class InMemoryRoomStore implements RoomStore {
   async appendActivity(roomCode: string, entry: ActivityEntry): Promise<void> {
     const record = await this.getOrCreate(roomCode);
     record.log.push(entry);
+    // Keep only the most recent MAX_LOG entries (log is oldest-first; drop from the front).
+    if (record.log.length > MAX_LOG) {
+      record.log.splice(0, record.log.length - MAX_LOG);
+    }
+  }
+
+  async deleteRoom(roomCode: string): Promise<void> {
+    this.rooms.delete(roomCode);
   }
 }

@@ -1,6 +1,12 @@
 'use client';
 
-import { useRoom } from '@/lib/useRoom';
+import {
+  connectRoom,
+  useConnected,
+  useCurrentTrack,
+  useIsPlaying,
+  useVolume,
+} from '@/lib/roomStore';
 import { useSearchParams } from 'next/navigation';
 import { Suspense, useEffect, useRef } from 'react';
 
@@ -37,7 +43,13 @@ const IFRAME_API_SRC = 'https://www.youtube.com/iframe_api';
 function PlayerInner() {
   const params = useSearchParams();
   const room = params.get('room') ?? '';
-  const { state, connected } = useRoom(room, 'player');
+
+  useEffect(() => connectRoom(room, 'player'), [room]);
+
+  const connected = useConnected();
+  const currentTrack = useCurrentTrack();
+  const stateIsPlaying = useIsPlaying();
+  const stateVolume = useVolume();
 
   const containerRef = useRef<HTMLDivElement | null>(null);
   const playerRef = useRef<YTPlayer | null>(null);
@@ -75,9 +87,9 @@ function PlayerInner() {
   }, []);
 
   // Apply authoritative state to the player.
-  const trackId = state?.currentTrack?.id ?? null;
-  const isPlaying = state?.isPlaying ?? false;
-  const volume = state?.volume ?? 100;
+  const trackId = currentTrack?.id ?? null;
+  const isPlaying = stateIsPlaying;
+  const volume = stateVolume;
 
   useEffect(() => {
     if (!playerRef.current || !readyRef.current || !trackId) return;
@@ -110,8 +122,7 @@ function PlayerInner() {
       <div className="rounded-xl bg-neutral-900 p-4">
         <p className="text-xs uppercase tracking-wide text-neutral-500">현재 곡</p>
         <p className="mt-1 text-lg font-semibold">
-          {state?.currentTrack?.title ??
-            (state?.currentTrack ? '(제목 없음)' : '재생 중인 곡 없음')}
+          {currentTrack?.title ?? (currentTrack ? '(제목 없음)' : '재생 중인 곡 없음')}
         </p>
       </div>
 

@@ -2,7 +2,15 @@
 
 import { ActivityFeed } from '@/components/ActivityFeed';
 import { ChangeTrackForm } from '@/components/ChangeTrackForm';
-import { useRoom } from '@/lib/useRoom';
+import {
+  actions,
+  connectRoom,
+  useActivityLog,
+  useConnected,
+  useCurrentTrack,
+  useIsPlaying,
+  useVolume,
+} from '@/lib/roomStore';
 import { useSearchParams } from 'next/navigation';
 import { Suspense, useEffect, useState } from 'react';
 
@@ -11,21 +19,19 @@ function ControllerInner() {
   const room = params.get('room') ?? '';
   const nick = params.get('nick') ?? undefined;
 
-  const { state, log, connected, changeTrack, setVolume, togglePlay } = useRoom(
-    room,
-    'controller',
-    nick,
-  );
+  useEffect(() => connectRoom(room, 'controller', nick), [room, nick]);
+
+  const connected = useConnected();
+  const log = useActivityLog();
+  const isPlaying = useIsPlaying();
+  const track = useCurrentTrack();
+  const stateVolume = useVolume();
 
   // Local mirror of the volume slider; synced to authoritative state.
   const [vol, setVol] = useState(100);
-  const stateVolume = state?.volume;
   useEffect(() => {
-    if (stateVolume !== undefined) setVol(stateVolume);
+    setVol(stateVolume);
   }, [stateVolume]);
-
-  const isPlaying = state?.isPlaying ?? false;
-  const track = state?.currentTrack ?? null;
 
   return (
     <main className="mx-auto flex min-h-screen w-full max-w-md flex-col gap-5 px-5 py-8">
@@ -60,7 +66,7 @@ function ControllerInner() {
       {/* change-track form */}
       <section className="rounded-xl bg-neutral-900 p-4">
         <h2 className="mb-3 text-sm font-semibold text-neutral-300">곡 변경</h2>
-        <ChangeTrackForm onSubmit={changeTrack} />
+        <ChangeTrackForm onSubmit={actions.changeTrack} />
       </section>
 
       {/* volume + play/pause */}
@@ -76,13 +82,13 @@ function ControllerInner() {
             max={100}
             value={vol}
             onChange={(e) => setVol(Number(e.target.value))}
-            onPointerUp={() => void setVolume(vol)}
+            onPointerUp={() => void actions.setVolume(vol)}
             className="w-full accent-emerald-500"
           />
         </div>
         <button
           type="button"
-          onClick={() => void togglePlay(!isPlaying)}
+          onClick={() => void actions.togglePlay(!isPlaying)}
           className="rounded-lg bg-emerald-500 px-4 py-3 text-base font-bold text-neutral-950"
         >
           {isPlaying ? '일시정지' : '재생'}

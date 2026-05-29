@@ -1,5 +1,5 @@
 import type { AddressInfo } from 'node:net';
-import { type Ack, type ActivityEntry, C2S, type RoomState, S2C } from '@remote-dj/shared';
+import { type Ack, type ActivityEntry, C2S, LIMITS, type RoomState, S2C } from '@remote-dj/shared';
 import { type Socket as ClientSocket, io as ioClient } from 'socket.io-client';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createServer } from './index.js';
@@ -126,5 +126,76 @@ describe('remote-dj server', () => {
       reason: 'i want this',
     })) as Ack;
     expect(ack.ok).toBe(false);
+  });
+
+  it('isolates a socket that switched rooms from its old room broadcasts', async () => {
+    const ROOM_A = 'ROOMAA';
+    const ROOM_B = 'ROOMBB';
+    const mover = connect();
+    const stayer = connect();
+
+    // mover joins A, then switches to B; stayer stays in A.
+    await mover.emitWithAck(C2S.Join, { roomCode: ROOM_A, role: 'controller' });
+    await stayer.emitWithAck(C2S.Join, { roomCode: ROOM_A, role: 'controller' });
+    await mover.emitWithAck(C2S.Join, { roomCode: ROOM_B, role: 'controller' });
+
+    // Any state the mover receives now must be for ROOM_B, never ROOM_A's track.
+    let moverSawTrack = false;
+    mover.on(S2C.State, (s: RoomState) => {
+      if (s.currentTrack?.id === 'dQw4w9WgXcQ') moverSawTrack = true;
+    });
+
+    // stayer changes track in ROOM_A and should see it; mover must not.
+    const stayerState = waitFor<RoomState>(
+      stayer,
+      S2C.State,
+      (s) => s.currentTrack?.id === 'dQw4w9WgXcQ',
+    );
+    const ack = (await stayer.emitWithAck(C2S.ChangeTrack, {
+      url: VALID_URL,
+      reason: 'set the vibe',
+    })) as Ack;
+    expect(ack.ok).toBe(true);
+
+    const s = await stayerState;
+    expect(s.roomCode).toBe(ROOM_A);
+    expect(moverSawTrack).toBe(false);
+  });
+
+  it('rejects changeTrack with an over-long reason', async () => {
+    const room = 'ROOM05';
+    const controller = connect();
+    await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+
+    const ack = (await controller.emitWithAck(C2S.ChangeTrack, {
+      url: VALID_URL,
+      reason: 'x'.repeat(LIMITS.reason + 1),
+    })) as Ack;
+    expect(ack.ok).toBe(false);
+  });
+
+  it('bumps stateVersion after a successful setVolume', async () => {
+    const room = 'ROOM06';
+    const controller = connect();
+    // Capture the state pushed during join (listener must be set up first).
+    const joinState = waitFor<RoomState>(controller, S2C.State);
+    const initial = (await controller.emitWithAck(C2S.Join, {
+      roomCode: room,
+      role: 'controller',
+    })) as Ack;
+    expect(initial.ok).toBe(true);
+
+    const before = await joinState;
+
+    const after = waitFor<RoomState>(
+      controller,
+      S2C.State,
+      (st) => st.stateVersion > before.stateVersion,
+    );
+    const ack = (await controller.emitWithAck(C2S.SetVolume, { volume: 42 })) as Ack;
+    expect(ack.ok).toBe(true);
+
+    const state = await after;
+    expect(state.stateVersion).toBeGreaterThan(before.stateVersion);
   });
 });

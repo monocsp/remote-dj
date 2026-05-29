@@ -8,7 +8,7 @@
     "dev:server": "npm run dev -w apps/server",
     "dev:web": "npm run dev -w apps/web",
     "typecheck": "npm run typecheck --workspaces --if-present",
-    "lint": "biome check .",
+    "lint": "biome check . && npm run lint -w apps/web",
     "format": "biome check --write .",
     "test": "vitest run"
   },

@@ -1,0 +1,114 @@
+'use client';
+
+import {
+  type Ack,
+  type ActivityEntry,
+  C2S,
+  type Role,
+  type RoomSettings,
+  type RoomState,
+  S2C,
+} from '@remote-dj/shared';
+import { type Socket, io } from 'socket.io-client';
+import { useStore } from 'zustand';
+import { createStore } from 'zustand/vanilla';
+import { getServerUrl } from './serverUrl';
+
+// ── Store shape ──────────────────────────────────────────────────────────
+interface RoomStoreState {
+  state: RoomState | null;
+  log: ActivityEntry[];
+  connected: boolean;
+  synced: boolean;
+  lastError: string | null;
+}
+
+const INITIAL: RoomStoreState = {
+  state: null,
+  log: [],
+  connected: false,
+  synced: false,
+  lastError: null,
+};
+
+const store = createStore<RoomStoreState>(() => INITIAL);
+
+const DISCONNECTED_ACK: Ack = { ok: false, error: 'not connected' };
+
+// ── Module-level single socket + ref counter ───────────────────────────────
+let socket: Socket | null = null;
+let refs = 0;
+
+/**
+ * Connect (or join the existing connection to) a room. The server is
+ * authoritative; this store merely mirrors pushed state. Safe under React
+ * StrictMode double-mount thanks to the ref counter — only the first ref
+ * creates the socket, only the last cleanup tears it down.
+ */
+export function connectRoom(roomCode: string, role: Role, nickname?: string): () => void {
+  if (!roomCode) return () => {};
+
+  refs += 1;
+
+  if (!socket) {
+    const s = io(getServerUrl(), { transports: ['websocket'] });
+    socket = s;
+
+    s.on('connect', () => {
+      store.setState({ connected: true });
+      s.emitWithAck(C2S.Join, { roomCode, role, nickname }).then((ack: Ack) => {
+        store.setState({ synced: ack.ok, lastError: ack.error ?? null });
+      });
+    });
+
+    s.on('disconnect', () => {
+      store.setState({ connected: false, synced: false });
+    });
+
+    s.on(S2C.State, (next: RoomState) => store.setState({ state: next }));
+    s.on(S2C.ActivityLog, (entries: ActivityEntry[]) => store.setState({ log: entries }));
+    s.on(S2C.Activity, (entry: ActivityEntry) =>
+      store.setState((prev) => ({ log: [entry, ...prev.log] })),
+    );
+  }
+
+  return () => {
+    refs -= 1;
+    if (refs <= 0) {
+      refs = 0;
+      socket?.disconnect();
+      socket = null;
+      store.setState(INITIAL, true);
+    }
+  };
+}
+
+// ── Actions (stable module-level identity) ──────────────────────────────────
+export const actions = {
+  changeTrack(url: string, reason: string, title?: string): Promise<Ack> {
+    if (!socket) return Promise.resolve(DISCONNECTED_ACK);
+    return socket.emitWithAck(C2S.ChangeTrack, { url, reason, title });
+  },
+  setVolume(volume: number, reason?: string): Promise<Ack> {
+    if (!socket) return Promise.resolve(DISCONNECTED_ACK);
+    return socket.emitWithAck(C2S.SetVolume, { volume, reason });
+  },
+  togglePlay(isPlaying: boolean, reason?: string): Promise<Ack> {
+    if (!socket) return Promise.resolve(DISCONNECTED_ACK);
+    return socket.emitWithAck(C2S.TogglePlay, { isPlaying, reason });
+  },
+  updateSettings(settings: Partial<RoomSettings>, reason?: string): Promise<Ack> {
+    if (!socket) return Promise.resolve(DISCONNECTED_ACK);
+    return socket.emitWithAck(C2S.UpdateSettings, { settings, reason });
+  },
+} as const;
+
+// ── Fine-grained selector hooks ──────────────────────────────────────────────
+export const useConnected = () => useStore(store, (s) => s.connected);
+export const useSynced = () => useStore(store, (s) => s.synced);
+export const useRoomState = () => useStore(store, (s) => s.state);
+export const useCurrentTrack = () => useStore(store, (s) => s.state?.currentTrack ?? null);
+export const useIsPlaying = () => useStore(store, (s) => s.state?.isPlaying ?? false);
+export const useVolume = () => useStore(store, (s) => s.state?.volume ?? 100);
+export const useActivityLog = () => useStore(store, (s) => s.log);
+export const useLastError = () => useStore(store, (s) => s.lastError);

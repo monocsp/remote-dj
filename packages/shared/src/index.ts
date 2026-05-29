@@ -25,6 +25,7 @@ export interface RoomState {
   settings: RoomSettings;
   presence: { playerConnected: boolean; controllers: number };
   updatedAt: number; // epoch ms
+  stateVersion: number; // monotonic counter, bumped on every patch; lets clients detect/resync missed updates
 }
 
 export type ActivityType = 'track_change' | 'volume' | 'play' | 'pause' | 'settings';
@@ -140,6 +141,14 @@ export function validateReason(r: string): boolean {
 /** Round then clamp to [0, 100]. */
 export function clampVolume(v: number): number {
   return Math.max(0, Math.min(100, Math.round(v)));
+}
+
+/** Max accepted lengths for free-form string inputs (chars). */
+export const LIMITS = { reason: 500, url: 2048, nickname: 40, title: 200 } as const;
+
+/** True if `s` is null/undefined or no longer than `max` chars. */
+export function withinLimit(s: string | undefined, max: number): boolean {
+  return s == null || s.length <= max;
 }
 
 const ROOM_CODE_CHARSET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
