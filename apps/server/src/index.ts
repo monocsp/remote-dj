@@ -5,8 +5,11 @@ import {
   type ActivityType,
   C2S,
   type ChangeTrackPayload,
+  type EnqueueTrackPayload,
   type JoinPayload,
   LIMITS,
+  type NextTrackPayload,
+  type RemoveQueuedPayload,
   type Role,
   type RoomSettings,
   type RoomState,
@@ -117,6 +120,19 @@ export function createServer(store: RoomStore = new InMemoryRoomStore()): {
     function requireController(ack: AckFn): string | null {
       if (data.role !== 'controller') {
         ack({ ok: false, error: 'controllers only' });
+        return null;
+      }
+      if (!data.roomCode) {
+        ack({ ok: false, error: 'not in a room' });
+        return null;
+      }
+      return data.roomCode;
+    }
+
+    /** Guard: only the player may emit player status reports. */
+    function requirePlayer(ack: AckFn): string | null {
+      if (data.role !== 'player') {
+        ack({ ok: false, error: 'player only' });
         return null;
       }
       if (!data.roomCode) {
@@ -274,6 +290,108 @@ export function createServer(store: RoomStore = new InMemoryRoomStore()): {
       const merged: RoomSettings = { ...record.state.settings, ...settings };
       await store.patchState(room, { settings: merged });
       await recordActivity('settings', reason?.trim() || null, settings);
+      ack({ ok: true });
+      await broadcastState(room);
+    });
+
+    socket.on(C2S.EnqueueTrack, async (payload: EnqueueTrackPayload, ack: AckFn) => {
+      const room = requireController(ack);
+      if (!room) return;
+      const { url, reason, title } = payload ?? ({} as EnqueueTrackPayload);
+
+      if (
+        !withinLimit(url, LIMITS.url) ||
+        !withinLimit(reason, LIMITS.reason) ||
+        !withinLimit(title, LIMITS.title)
+      ) {
+        ack({ ok: false, error: 'input too long' });
+        return;
+      }
+      // Unlike changeTrack, enqueue reason is OPTIONAL — no validateReason check.
+      const id = parseYouTubeId(url);
+      if (!id) {
+        ack({ ok: false, error: 'invalid youtube url' });
+        return;
+      }
+
+      const track: Track = {
+        id,
+        url,
+        title: title ?? null,
+        addedBy: data.nickname ?? null,
+      };
+      const record = await store.getOrCreate(room);
+      await store.patchState(room, { queue: [...record.state.queue, track] });
+      await recordActivity('enqueue', reason?.trim() || null, { id, url, title: track.title });
+      ack({ ok: true });
+      await broadcastState(room);
+    });
+
+    socket.on(C2S.RemoveQueued, async (payload: RemoveQueuedPayload, ack: AckFn) => {
+      const room = requireController(ack);
+      if (!room) return;
+      const { index, reason } = payload ?? ({} as RemoveQueuedPayload);
+      if (!withinLimit(reason, LIMITS.reason)) {
+        ack({ ok: false, error: 'input too long' });
+        return;
+      }
+
+      const record = await store.getOrCreate(room);
+      const queue = record.state.queue;
+      if (!Number.isInteger(index) || index < 0 || index >= queue.length) {
+        ack({ ok: false, error: 'invalid index' });
+        return;
+      }
+
+      const next = [...queue.slice(0, index), ...queue.slice(index + 1)];
+      await store.patchState(room, { queue: next });
+      await recordActivity('dequeue', reason?.trim() || null, { index });
+      ack({ ok: true });
+      await broadcastState(room);
+    });
+
+    socket.on(C2S.NextTrack, async (payload: NextTrackPayload, ack: AckFn) => {
+      const room = requireController(ack);
+      if (!room) return;
+      const { reason } = payload ?? ({} as NextTrackPayload);
+      if (!withinLimit(reason, LIMITS.reason)) {
+        ack({ ok: false, error: 'input too long' });
+        return;
+      }
+
+      const record = await store.getOrCreate(room);
+      const queue = record.state.queue;
+      if (queue.length === 0) {
+        // Nothing queued: no-op success, no broadcast needed.
+        ack({ ok: true });
+        return;
+      }
+
+      const [head, ...rest] = queue;
+      await store.patchState(room, { currentTrack: head, queue: rest, isPlaying: true });
+      await recordActivity('skip', reason?.trim() || null, { id: head.id });
+      ack({ ok: true });
+      await broadcastState(room);
+    });
+
+    socket.on(C2S.TrackEnded, async (_payload, ack: AckFn) => {
+      const room = requirePlayer(ack);
+      if (!room) return;
+
+      // Behaves like an automatic next: advance the queue if anything is queued,
+      // otherwise just stop playing.
+      const record = await store.getOrCreate(room);
+      const queue = record.state.queue;
+      if (queue.length === 0) {
+        await store.patchState(room, { isPlaying: false });
+        ack({ ok: true });
+        await broadcastState(room);
+        return;
+      }
+
+      const [head, ...rest] = queue;
+      await store.patchState(room, { currentTrack: head, queue: rest, isPlaying: true });
+      await recordActivity('skip', null, { auto: true });
       ack({ ok: true });
       await broadcastState(room);
     });

@@ -2,6 +2,7 @@
 
 import { ActivityFeed } from '@/components/ActivityFeed';
 import { ChangeTrackForm } from '@/components/ChangeTrackForm';
+import { EnqueueForm } from '@/components/EnqueueForm';
 import {
   actions,
   connectRoom,
@@ -10,6 +11,7 @@ import {
   useCurrentTrack,
   useIsPlaying,
   useLastError,
+  useQueue,
   useVolume,
 } from '@/lib/roomStore';
 import { useSearchParams } from 'next/navigation';
@@ -33,6 +35,7 @@ function ControllerInner() {
   const log = useActivityLog();
   const isPlaying = useIsPlaying();
   const track = useCurrentTrack();
+  const queue = useQueue();
   const stateVolume = useVolume();
 
   // Local mirror of the volume slider; synced to authoritative state.
@@ -83,6 +86,50 @@ function ControllerInner() {
       <section className="rounded-xl bg-neutral-900 p-4">
         <h2 className="mb-3 text-sm font-semibold text-neutral-300">곡 변경</h2>
         <ChangeTrackForm onSubmit={actions.changeTrack} />
+      </section>
+
+      {/* queue (대기열) */}
+      <section className="rounded-xl bg-neutral-900 p-4">
+        <div className="mb-3 flex items-center justify-between">
+          <h2 className="text-sm font-semibold text-neutral-300">대기열</h2>
+          <button
+            type="button"
+            onClick={() => void actions.nextTrack()}
+            disabled={queue.length === 0}
+            className="rounded-lg bg-emerald-500 px-3 py-1.5 text-xs font-bold text-neutral-950 transition disabled:opacity-40"
+          >
+            다음 곡
+          </button>
+        </div>
+
+        {queue.length === 0 ? (
+          <p className="py-4 text-center text-sm text-neutral-500">대기열이 비어 있습니다.</p>
+        ) : (
+          <ul className="mb-3 flex flex-col gap-2">
+            {queue.map((item, index) => (
+              <li
+                key={`${item.id}-${index}`}
+                className="flex items-center justify-between gap-2 rounded-lg bg-neutral-800/60 px-3 py-2"
+              >
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-medium text-neutral-200">
+                    {item.title ?? '(제목 없음)'}
+                  </p>
+                  <p className="truncate text-xs text-neutral-500">{item.url}</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void actions.removeQueued(index)}
+                  className="shrink-0 rounded-lg bg-neutral-700 px-3 py-1.5 text-xs font-semibold text-neutral-200"
+                >
+                  제거
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+
+        <EnqueueForm onSubmit={actions.enqueueTrack} />
       </section>
 
       {/* volume + play/pause */}

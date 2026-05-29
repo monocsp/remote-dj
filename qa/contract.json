@@ -4,7 +4,11 @@
     "ChangeTrack": "changeTrack",
     "SetVolume": "setVolume",
     "TogglePlay": "togglePlay",
-    "UpdateSettings": "updateSettings"
+    "UpdateSettings": "updateSettings",
+    "EnqueueTrack": "enqueueTrack",
+    "RemoveQueued": "removeQueued",
+    "NextTrack": "nextTrack",
+    "TrackEnded": "trackEnded"
   },
   "s2c": {
     "State": "state",

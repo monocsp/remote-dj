@@ -8,6 +8,9 @@ const TYPE_LABEL: Record<ActivityType, string> = {
   play: '재생',
   pause: '일시정지',
   settings: '설정',
+  enqueue: '대기열 추가',
+  dequeue: '대기열 제거',
+  skip: '다음 곡',
 };
 
 function relativeTime(ts: number): string {

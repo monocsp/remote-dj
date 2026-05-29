@@ -1,9 +1,9 @@
 import { defineConfig, devices } from '@playwright/test';
 
-// Black-box web E2E config. Scenarios trace to docs/qa/*.md (PAIR-*, TRK-*, RT-*).
-// The webServer starts the WHOLE app from the repo root via `npm run dev`,
-// which `concurrently` launches as server(:3001) + web(:3000). We only point
-// the baseURL at the web app; the server comes up alongside it.
+// Black-box web E2E config. Scenarios trace to docs/qa/*.md (PAIR-*, TRK-*, RT-*, QUEUE-*).
+// Two webServers so tests don't start until BOTH are ready: the socket server
+// (:3001 /health) AND the web app (:3000). Waiting only on :3000 caused the
+// browser to connect before :3001 was up → "연결됨" never appeared (flake).
 
 export default defineConfig({
   testDir: './e2e',
@@ -23,11 +23,20 @@ export default defineConfig({
       use: { ...devices['Pixel 7'] },
     },
   ],
-  webServer: {
-    command: 'npm run dev',
-    cwd: '../../',
-    url: 'http://localhost:3000',
-    reuseExistingServer: !process.env.CI,
-    timeout: 120_000,
-  },
+  webServer: [
+    {
+      command: 'npm run dev:server',
+      cwd: '../../',
+      url: 'http://localhost:3001/health',
+      reuseExistingServer: !process.env.CI,
+      timeout: 120_000,
+    },
+    {
+      command: 'npm run dev:web',
+      cwd: '../../',
+      url: 'http://localhost:3000',
+      reuseExistingServer: !process.env.CI,
+      timeout: 120_000,
+    },
+  ],
 });

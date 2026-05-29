@@ -262,4 +262,112 @@ describe('remote-dj server', () => {
     const state = await after;
     expect(state.stateVersion).toBeGreaterThan(before.stateVersion);
   });
+
+  it('enqueue adds the track to broadcast state.queue and logs enqueue', async () => {
+    const room = 'QUEUE1';
+    const controller = connect();
+    const player = connect();
+    await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+    await player.emitWithAck(C2S.Join, { roomCode: room, role: 'player' });
+
+    const hasQueued = (s: RoomState) => s.queue.some((t) => t.id === 'dQw4w9WgXcQ');
+    const isEnqueue = (a: ActivityEntry) => a.type === 'enqueue';
+    const playerState = waitFor<RoomState>(player, S2C.State, hasQueued);
+    const playerActivity = waitFor<ActivityEntry>(player, S2C.Activity, isEnqueue);
+
+    const ack = (await controller.emitWithAck(C2S.EnqueueTrack, {
+      url: VALID_URL,
+      title: 'Never Gonna Give You Up',
+    })) as Ack;
+    expect(ack.ok).toBe(true);
+
+    const [ps, pa] = await Promise.all([playerState, playerActivity]);
+    expect(ps.queue[0]?.id).toBe('dQw4w9WgXcQ');
+    expect(ps.currentTrack).toBeNull();
+    expect(pa.type).toBe('enqueue');
+  });
+
+  it('nextTrack advances currentTrack to the queued item and shrinks the queue', async () => {
+    const room = 'QUEUE2';
+    const controller = connect();
+    await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+
+    await controller.emitWithAck(C2S.EnqueueTrack, { url: VALID_URL });
+
+    const advanced = waitFor<RoomState>(
+      controller,
+      S2C.State,
+      (s) => s.currentTrack?.id === 'dQw4w9WgXcQ',
+    );
+    const ack = (await controller.emitWithAck(C2S.NextTrack, {})) as Ack;
+    expect(ack.ok).toBe(true);
+
+    const state = await advanced;
+    expect(state.currentTrack?.id).toBe('dQw4w9WgXcQ');
+    expect(state.queue.length).toBe(0);
+    expect(state.isPlaying).toBe(true);
+  });
+
+  it('nextTrack on an empty queue is a no-op ok', async () => {
+    const room = 'QUEUE3';
+    const controller = connect();
+    await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+
+    const ack = (await controller.emitWithAck(C2S.NextTrack, {})) as Ack;
+    expect(ack.ok).toBe(true);
+  });
+
+  it('removeQueued with an out-of-range index acks false', async () => {
+    const room = 'QUEUE4';
+    const controller = connect();
+    await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+
+    const ack = (await controller.emitWithAck(C2S.RemoveQueued, { index: 5 })) as Ack;
+    expect(ack.ok).toBe(false);
+    expect(ack.error).toBe('invalid index');
+  });
+
+  it('trackEnded from a player advances the queue', async () => {
+    const room = 'QUEUE5';
+    const controller = connect();
+    const player = connect();
+    await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+    await player.emitWithAck(C2S.Join, { roomCode: room, role: 'player' });
+
+    await controller.emitWithAck(C2S.EnqueueTrack, { url: VALID_URL });
+
+    const advanced = waitFor<RoomState>(
+      player,
+      S2C.State,
+      (s) => s.currentTrack?.id === 'dQw4w9WgXcQ',
+    );
+    const ack = (await player.emitWithAck(C2S.TrackEnded, {})) as Ack;
+    expect(ack.ok).toBe(true);
+
+    const state = await advanced;
+    expect(state.currentTrack?.id).toBe('dQw4w9WgXcQ');
+    expect(state.queue.length).toBe(0);
+  });
+
+  it('rejects enqueue and nextTrack from a player (controller-only)', async () => {
+    const room = 'QUEUE6';
+    const player = connect();
+    await player.emitWithAck(C2S.Join, { roomCode: room, role: 'player' });
+
+    const enqAck = (await player.emitWithAck(C2S.EnqueueTrack, { url: VALID_URL })) as Ack;
+    expect(enqAck.ok).toBe(false);
+
+    const nextAck = (await player.emitWithAck(C2S.NextTrack, {})) as Ack;
+    expect(nextAck.ok).toBe(false);
+  });
+
+  it('rejects trackEnded from a controller (player-only)', async () => {
+    const room = 'QUEUE7';
+    const controller = connect();
+    await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+
+    const ack = (await controller.emitWithAck(C2S.TrackEnded, {})) as Ack;
+    expect(ack.ok).toBe(false);
+    expect(ack.error).toBe('player only');
+  });
 });

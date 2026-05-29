@@ -16,13 +16,17 @@ import socketio
 
 from contract import (
     CHANGE_TRACK,
+    ENQUEUE_TRACK,
     EV_ACTIVITY,
     EV_ACTIVITY_LOG,
     EV_STATE,
     JOIN,
     LIMITS,
+    NEXT_TRACK,
+    REMOVE_QUEUED,
     SET_VOLUME,
     TOGGLE_PLAY,
+    TRACK_ENDED,
 )
 
 ROOM_CHARSET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
@@ -272,3 +276,100 @@ def test_RT_07_nickname_length_cap(make_client):
     over = "n" * (LIMITS["nickname"] + 1)
     ack = c.join(room, nickname=over)
     assert ack["ok"] is False
+
+
+# ── QUEUE-01/02: enqueue appends to state.queue, logs enqueue, reason null ──
+def test_QUEUE_01_02_enqueue_appends(make_client):
+    c = make_client()
+    room = room_code()
+    c.join(room)
+    c.states.clear()
+    c.activities.clear()
+    ack = c.call(ENQUEUE_TRACK, {"url": VALID_URL})  # no reason
+    assert ack["ok"] is True
+    c.wait_event(3.0)
+    st = c.last_state()
+    assert st is not None
+    assert any(t["id"] == VALID_ID for t in st["queue"])
+    assert st["currentTrack"] is None  # currentTrack unchanged
+    enq = [a for a in c.activities if a["type"] == "enqueue"]
+    assert enq and enq[-1]["reason"] is None  # QUEUE-02: optional reason
+
+
+# ── QUEUE-06: out-of-range removeQueued index is rejected, queue unchanged ──
+def test_QUEUE_06_remove_out_of_range(make_client):
+    c = make_client()
+    room = room_code()
+    c.join(room)
+    ack = c.call(REMOVE_QUEUED, {"index": 5})
+    assert ack["ok"] is False
+    assert ack.get("error") == "invalid index"
+
+
+# ── QUEUE-07: nextTrack promotes head to currentTrack and shrinks queue ─────
+def test_QUEUE_07_next_track_advances(make_client):
+    c = make_client()
+    room = room_code()
+    c.join(room)
+    assert c.call(ENQUEUE_TRACK, {"url": VALID_URL})["ok"] is True
+    c.states.clear()
+    c.activities.clear()
+    ack = c.call(NEXT_TRACK, {})
+    assert ack["ok"] is True
+    c.wait_event(3.0)
+    st = c.last_state()
+    assert st["currentTrack"]["id"] == VALID_ID
+    assert len(st["queue"]) == 0
+    assert st["isPlaying"] is True
+    assert any(a["type"] == "skip" for a in c.activities)
+
+
+# ── QUEUE-08: nextTrack on an empty queue is an ok no-op ────────────────────
+def test_QUEUE_08_next_track_empty_noop(make_client):
+    c = make_client()
+    room = room_code()
+    c.join(room)
+    c.states.clear()
+    ack = c.call(NEXT_TRACK, {})
+    assert ack["ok"] is True
+    # No broadcast / state change expected.
+    assert c.wait_event(2.0) is False
+
+
+# ── QUEUE-09: a Player's trackEnded auto-advances the queue ─────────────────
+def test_QUEUE_09_track_ended_advances(make_client):
+    controller = make_client()
+    player = make_client()
+    room = room_code()
+    controller.join(room)
+    player.join(room, role="player")
+    assert controller.call(ENQUEUE_TRACK, {"url": VALID_URL})["ok"] is True
+    player.states.clear()
+    player.activities.clear()
+    ack = player.call(TRACK_ENDED, {})
+    assert ack["ok"] is True
+    player.wait_event(3.0)
+    st = player.last_state()
+    assert st["currentTrack"]["id"] == VALID_ID
+    assert len(st["queue"]) == 0
+    skips = [a for a in player.activities if a["type"] == "skip"]
+    assert skips and skips[-1].get("detail", {}).get("auto") is True
+
+
+# ── QUEUE-11: queue control (enqueue/nextTrack) is controllers only ─────────
+def test_QUEUE_11_queue_control_controllers_only(make_client):
+    p = make_client()
+    room = room_code()
+    assert p.join(room, role="player")["ok"] is True
+    assert p.call(ENQUEUE_TRACK, {"url": VALID_URL})["ok"] is False
+    assert p.call(NEXT_TRACK, {})["ok"] is False
+
+
+# ── QUEUE-12: trackEnded is player only (controller rejected) ───────────────
+def test_QUEUE_12_track_ended_player_only(make_client):
+    c = make_client()
+    room = room_code()
+    assert c.join(room)["ok"] is True
+    ack = c.call(TRACK_ENDED, {})
+    assert ack["ok"] is False
+    assert ack.get("error") == "player only"

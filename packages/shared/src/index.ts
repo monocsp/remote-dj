@@ -20,6 +20,7 @@ export interface RoomSettings {
 export interface RoomState {
   roomCode: string;
   currentTrack: Track | null;
+  queue: Track[]; // upcoming tracks, played in order after currentTrack
   isPlaying: boolean;
   volume: number; // 0-100
   settings: RoomSettings;
@@ -28,7 +29,15 @@ export interface RoomState {
   stateVersion: number; // monotonic counter, bumped on every patch; lets clients detect/resync missed updates
 }
 
-export type ActivityType = 'track_change' | 'volume' | 'play' | 'pause' | 'settings';
+export type ActivityType =
+  | 'track_change'
+  | 'volume'
+  | 'play'
+  | 'pause'
+  | 'settings'
+  | 'enqueue'
+  | 'dequeue'
+  | 'skip';
 
 export interface ActivityEntry {
   id: string;
@@ -68,6 +77,24 @@ export interface UpdateSettingsPayload {
   reason?: string;
 }
 
+export interface EnqueueTrackPayload {
+  url: string;
+  reason?: string; // optional — unlike changeTrack, enqueue reason is not required
+  title?: string;
+}
+
+export interface RemoveQueuedPayload {
+  index: number; // index into RoomState.queue
+  reason?: string;
+}
+
+export interface NextTrackPayload {
+  reason?: string; // optional
+}
+
+// Player status report: the current track finished playing. No fields.
+export type TrackEndedPayload = Record<string, never>;
+
 export interface Ack {
   ok: boolean;
   error?: string;
@@ -80,6 +107,10 @@ export const C2S = {
   SetVolume: 'setVolume',
   TogglePlay: 'togglePlay',
   UpdateSettings: 'updateSettings',
+  EnqueueTrack: 'enqueueTrack',
+  RemoveQueued: 'removeQueued',
+  NextTrack: 'nextTrack',
+  TrackEnded: 'trackEnded',
 } as const;
 
 export const S2C = {

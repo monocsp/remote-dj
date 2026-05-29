@@ -51,6 +51,10 @@ type Role = 'player' | 'controller';
 | `setVolume` | C→S | `{ volume: number; reason?: string }` | 서버가 `clampVolume` 으로 0..100 정수 보정 후 적용 |
 | `togglePlay` | C→S | `{ isPlaying: boolean; reason?: string }` | activity는 `play` 또는 `pause` 로 기록 |
 | `updateSettings` | C→S | `{ settings: Partial<RoomSettings>; reason?: string }` | 부분 병합 |
+| `enqueueTrack` | C→S | `{ url: string; reason?: string; title?: string }` | url 파싱 실패 시 `{ ok:false, error:'invalid youtube url' }`. **사유 선택**. 큐 끝에 추가, activity `enqueue` |
+| `removeQueued` | C→S | `{ index: number; reason?: string }` | `index` 가 `[0, queue.length)` 정수가 아니면 `{ ok:false, error:'invalid index' }`. activity `dequeue` |
+| `nextTrack` | C→S | `{ reason?: string }` | 큐가 있으면 맨 앞 곡을 `currentTrack` 으로 승격(`isPlaying:true`), activity `skip`. 큐가 비어있으면 `{ ok:true }` no-op. **사유 선택** |
+| `trackEnded` | C→S | `{}` | **Player 전용**(controller가 발행 시 `{ ok:false, error:'player only' }`). 자동 next처럼 동작: 큐 있으면 승격(activity `skip`, detail `{auto:true}`), 비어있으면 `isPlaying:false` |
 | `state` | S→C | `RoomState` | join 직후 + 모든 변경 후 브로드캐스트 |
 | `activity` | S→C | `ActivityEntry` | 신규 항목 1건 |
 | `activityLog` | S→C | `ActivityEntry[]` | join 직후 전체 로그 |
@@ -76,6 +80,7 @@ interface RoomSettings {
 interface RoomState {
   roomCode: string;
   currentTrack: Track | null;
+  queue: Track[];          // currentTrack 다음에 순서대로 재생될 대기열
   isPlaying: boolean;
   volume: number;          // 0-100
   settings: RoomSettings;
@@ -83,7 +88,9 @@ interface RoomState {
   updatedAt: number;       // epoch ms
 }
 
-type ActivityType = 'track_change' | 'volume' | 'play' | 'pause' | 'settings';
+type ActivityType =
+  | 'track_change' | 'volume' | 'play' | 'pause' | 'settings'
+  | 'enqueue' | 'dequeue' | 'skip';
 
 interface ActivityEntry {
   id: string;
@@ -94,6 +101,21 @@ interface ActivityEntry {
   detail?: Record<string, unknown>;
 }
 ```
+
+## 재생 큐 (queue / playlist)
+
+방은 단일 `currentTrack` 외에 **재생 큐**(`RoomState.queue: Track[]`)를 가진다. 큐는 `currentTrack` **다음에** 순서대로 재생될 대기 곡 목록이며, 맨 앞(index 0)이 다음 곡이다.
+
+| 동작 | 발행자 | 사유 | 효과 |
+| --- | --- | --- | --- |
+| `enqueueTrack` | Controller | **선택** | url 파싱 → `Track {id,url,title,addedBy}` 를 큐 끝에 추가. activity `enqueue`, detail `{id,url,title}` |
+| `removeQueued` | Controller | **선택** | `index` 위치의 곡 제거(범위 밖이면 `invalid index`). activity `dequeue`, detail `{index}` |
+| `nextTrack` | Controller | **선택** | 큐 맨 앞 곡을 `currentTrack` 으로 승격하고 큐에서 제거, `isPlaying:true`. 큐가 비어있으면 no-op `{ok:true}`. activity `skip`, detail `{id}` |
+| `trackEnded` | **Player 전용** | 없음 | 플레이어가 현재 곡 종료를 보고. 자동 next처럼 동작 — 큐 있으면 승격(activity `skip`, detail `{auto:true}`), 비어있으면 `isPlaying:false` |
+
+- **사유 정책**: `enqueueTrack` / `nextTrack` / `trackEnded` 의 사유는 **선택**이다(비면 `reason: null` 로 기록). 반면 **`changeTrack` 은 사유 필수**(`validateReason`)이며, `currentTrack` 만 설정하고 **큐를 건드리지 않는다** — 큐 모델과 독립적이다.
+- **`trackEnded` 는 Player 전용**이다: controller가 발행하면 ack `{ ok:false, error:'player only' }`. 그 외 큐 제어 이벤트는 모두 Controller 전용이다.
+- 신규 방은 `queue: []` 로 시작한다.
 
 ## 검증 규칙
 
@@ -160,11 +182,14 @@ interface ActivityEntry {
 | `setVolume` | X | O |
 | `togglePlay` | X | O |
 | `updateSettings` | X | O |
+| `enqueueTrack` | X | O |
+| `removeQueued` | X | O |
+| `nextTrack` | X | O |
+| `trackEnded` | **O** | X |
 
 ## 비범위 (추후)
 
 - 본격 인증/세션 정책(현재는 익명 + 선택 닉네임 + 선택적 방 비밀번호)
 - QR 코드 페어링
 - 영속 저장소(SQLite/Postgres) — 현재는 인메모리
-- 재생 큐/플레이리스트(현재는 단일 currentTrack)
 - 사용자 강퇴/방장 권한

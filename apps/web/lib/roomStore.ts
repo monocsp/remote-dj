@@ -8,6 +8,7 @@ import {
   type RoomSettings,
   type RoomState,
   S2C,
+  type Track,
 } from '@remote-dj/shared';
 import { type Socket, io } from 'socket.io-client';
 import { useStore } from 'zustand';
@@ -34,6 +35,10 @@ const INITIAL: RoomStoreState = {
 const store = createStore<RoomStoreState>(() => INITIAL);
 
 const DISCONNECTED_ACK: Ack = { ok: false, error: 'not connected' };
+
+// Stable empty-array reference. Returning a fresh `[]` from a useSyncExternalStore
+// selector triggers React's "getServerSnapshot should be cached" infinite loop.
+const EMPTY_QUEUE: Track[] = [];
 
 // ── Module-level single socket + ref counter ───────────────────────────────
 let socket: Socket | null = null;
@@ -106,6 +111,22 @@ export const actions = {
     if (!socket) return Promise.resolve(DISCONNECTED_ACK);
     return socket.emitWithAck(C2S.UpdateSettings, { settings, reason });
   },
+  enqueueTrack(url: string, reason?: string, title?: string): Promise<Ack> {
+    if (!socket) return Promise.resolve(DISCONNECTED_ACK);
+    return socket.emitWithAck(C2S.EnqueueTrack, { url, reason, title });
+  },
+  removeQueued(index: number, reason?: string): Promise<Ack> {
+    if (!socket) return Promise.resolve(DISCONNECTED_ACK);
+    return socket.emitWithAck(C2S.RemoveQueued, { index, reason });
+  },
+  nextTrack(reason?: string): Promise<Ack> {
+    if (!socket) return Promise.resolve(DISCONNECTED_ACK);
+    return socket.emitWithAck(C2S.NextTrack, { reason });
+  },
+  trackEnded(): Promise<Ack> {
+    if (!socket) return Promise.resolve(DISCONNECTED_ACK);
+    return socket.emitWithAck(C2S.TrackEnded, {});
+  },
 } as const;
 
 // ── Fine-grained selector hooks ──────────────────────────────────────────────
@@ -115,5 +136,6 @@ export const useRoomState = () => useStore(store, (s) => s.state);
 export const useCurrentTrack = () => useStore(store, (s) => s.state?.currentTrack ?? null);
 export const useIsPlaying = () => useStore(store, (s) => s.state?.isPlaying ?? false);
 export const useVolume = () => useStore(store, (s) => s.state?.volume ?? 100);
+export const useQueue = () => useStore(store, (s) => s.state?.queue ?? EMPTY_QUEUE);
 export const useActivityLog = () => useStore(store, (s) => s.log);
 export const useLastError = () => useStore(store, (s) => s.lastError);

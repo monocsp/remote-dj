@@ -30,6 +30,7 @@ function createInitialState(roomCode: string): RoomState {
   return {
     roomCode,
     currentTrack: null,
+    queue: [],
     isPlaying: false,
     volume: 50,
     settings: { allowAnonymous: true },

@@ -1,6 +1,7 @@
 'use client';
 
 import {
+  actions,
   connectRoom,
   useConnected,
   useCurrentTrack,
@@ -21,6 +22,9 @@ interface YTPlayer {
   pauseVideo(): void;
   setVolume(volume: number): void;
 }
+interface YTStateChangeEvent {
+  data: number;
+}
 interface YTNamespace {
   Player: new (
     el: HTMLElement,
@@ -28,9 +32,13 @@ interface YTNamespace {
       height?: string;
       width?: string;
       playerVars?: Record<string, unknown>;
-      events?: { onReady?: () => void };
+      events?: {
+        onReady?: () => void;
+        onStateChange?: (event: YTStateChangeEvent) => void;
+      };
     },
   ) => YTPlayer;
+  PlayerState: { ENDED: number; PLAYING: number; PAUSED: number; BUFFERING: number; CUED: number };
 }
 declare global {
   interface Window {
@@ -62,6 +70,8 @@ function PlayerInner() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const playerRef = useRef<YTPlayer | null>(null);
   const readyRef = useRef(false);
+  // Guard so a single playback end reports trackEnded at most once.
+  const endedRef = useRef(false);
 
   // Inject the IFrame API script once and build the player.
   useEffect(() => {
@@ -77,6 +87,17 @@ function PlayerInner() {
         events: {
           onReady: () => {
             readyRef.current = true;
+          },
+          onStateChange: (event) => {
+            // Auto-advance: when the current video ends, tell the server.
+            if (event.data === window.YT?.PlayerState.ENDED) {
+              if (endedRef.current) return;
+              endedRef.current = true;
+              void actions.trackEnded();
+            } else {
+              // Any non-ENDED state (e.g. a freshly-loaded next track) re-arms.
+              endedRef.current = false;
+            }
           },
         },
       });
@@ -101,6 +122,7 @@ function PlayerInner() {
 
   useEffect(() => {
     if (!playerRef.current || !readyRef.current || !trackId) return;
+    endedRef.current = false;
     playerRef.current.loadVideoById(trackId);
   }, [trackId]);
 

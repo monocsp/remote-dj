@@ -10,6 +10,7 @@ import { io as ioClient } from 'socket.io-client';
 //   TRK-06 track change updates Player's YouTube playback (loadVideoById)
 //   PAIR-01/07 pairing happy-path (join → connected)
 //   PAIR-06 wrong-password rejection (room stays gated)
+//   QUEUE-01/07 enqueue propagates A → B; 다음 곡 promotes head to now-playing
 //
 // The YouTube IFrame API is mocked so no real network/login is needed: we
 // intercept the iframe_api script and inject a window.YT stub that records
@@ -74,14 +75,17 @@ async function openRoom(
   const page = await context.newPage();
   const q = nick ? `&nick=${encodeURIComponent(nick)}` : '';
   await page.goto(`/${role}?room=${room}${q}`);
-  await expect(page.getByText('연결됨')).toBeVisible({ timeout: 20_000 });
+  // Generous timeout absorbs Next dev's on-demand route compile on first hit.
+  await expect(page.getByText('연결됨')).toBeVisible({ timeout: 30_000 });
   return page;
 }
 
 async function changeTrack(page: Page, url: string, reason: string): Promise<void> {
-  await page.getByPlaceholder('YouTube URL').fill(url);
-  await page.getByPlaceholder('사유 (필수)').fill(reason);
-  await page.getByRole('button', { name: '곡 변경' }).click();
+  // Scope to the 곡 변경 section — the 대기열 section has its own URL input.
+  const section = page.locator('section', { hasText: '곡 변경' });
+  await section.getByPlaceholder('YouTube URL').fill(url);
+  await section.getByPlaceholder('사유 (필수)').fill(reason);
+  await section.getByRole('button', { name: '곡 변경' }).click();
 }
 
 // RT-01 + TRK-06: a track change by Controller A reaches Controller B's UI and
@@ -114,6 +118,41 @@ test('RT-01/TRK-06 multi-controller sync + player playback', async ({ browser })
     .toContain(VALID_ID);
 
   await Promise.all([playerCtx.close(), ctxA.close(), ctxB.close()]);
+});
+
+async function enqueueTrack(page: Page, url: string): Promise<void> {
+  const queueSection = page.locator('section', { hasText: '대기열' });
+  await queueSection.getByPlaceholder('YouTube URL').fill(url);
+  await queueSection.getByRole('button', { name: '대기열 추가' }).click();
+}
+
+// QUEUE-01 + QUEUE-07: Controller A enqueues a valid track → it appears in
+// Controller B's queue UI; A clicks 다음 곡 → the formerly-queued track becomes
+// the now-playing track on both controllers.
+test('QUEUE-01/07 enqueue propagates + 다음 곡 promotes to now-playing', async ({ browser }) => {
+  const room = uniqueRoom();
+
+  const ctxA = await browser.newContext();
+  const ctxB = await browser.newContext();
+
+  const a = await openRoom(ctxA, 'controller', room, 'A');
+  const b = await openRoom(ctxB, 'controller', room, 'B');
+
+  // QUEUE-01: A enqueues a valid track (no reason required for enqueue).
+  await enqueueTrack(a, VALID_URL);
+
+  // The enqueued URL shows up in Controller B's queue list.
+  const bQueue = b.locator('section', { hasText: '대기열' });
+  await expect(bQueue.getByText(VALID_URL)).toBeVisible({ timeout: 15_000 });
+
+  // QUEUE-07: A clicks 다음 곡 → head promotes to currentTrack.
+  await a.getByRole('button', { name: '다음 곡' }).click();
+
+  // Both controllers' now-playing card reflects the formerly-queued track.
+  await expect(a.getByRole('link', { name: VALID_URL })).toBeVisible({ timeout: 15_000 });
+  await expect(b.getByRole('link', { name: VALID_URL })).toBeVisible({ timeout: 15_000 });
+
+  await Promise.all([ctxA.close(), ctxB.close()]);
 });
 
 // PAIR-01/07: pairing happy-path — a controller joining an open room connects
