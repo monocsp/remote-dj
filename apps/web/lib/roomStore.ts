@@ -147,6 +147,7 @@ export const useVolume = () => useStore(store, (s) => s.state?.volume ?? 100);
 export const useQueue = () => useStore(store, (s) => s.state?.queue ?? EMPTY_QUEUE);
 // Returns the stored nullable object reference directly — stable until the
 // server pushes a new RoomState — so it's safe for useSyncExternalStore.
+export const useSettings = () => useStore(store, (s) => s.state?.settings ?? null);
 export const useProgress = () => useStore(store, (s) => s.state?.progress ?? null);
 export const useLastSeek = () => useStore(store, (s) => s.state?.lastSeek ?? null);
 export const useActivityLog = () => useStore(store, (s) => s.log);

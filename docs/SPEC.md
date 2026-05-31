@@ -147,6 +147,7 @@ interface ActivityEntry {
 | 음량 | `clampVolume(v)` = 반올림 후 0..100 클램프 | 자동 보정(에러 아님) |
 | 제어 권한 | role === `'controller'` | Player가 발행 시 ack `{ ok:false }` |
 | 그 외 사유 | 선택 — 비어있으면 `reason: null` 로 기록 | — |
+| 익명 콘텐츠 제한 | `settings.allowAnonymous === false` 인 방에서, **콘텐츠 액션**(`changeTrack`/`enqueueTrack`/`nextTrack`)은 닉네임 없는 소켓에서 거부. 권한(컨트롤러) 검사 통과 후 적용 | ack `{ ok:false, error:'nickname required' }` |
 | 방 비밀번호 | 방에 비밀번호가 있으면 `join.password` 가 일치해야 함 | ack `{ ok:false, error:'wrong password' }` |
 | 입력 길이 | `withinLimit(s, LIMITS.*)` — reason 500 / url 2048 / title 200 / nickname 40 / password 64 | ack `{ ok:false, error:'... too long' }` |
 
@@ -172,6 +173,22 @@ interface ActivityEntry {
 
 - `actor` 가 `null` 이면 익명으로 표시한다.
 - `track_change` 는 항상 `reason` 이 non-null이다(검증 규칙).
+
+## 설정 (RoomSettings / allowAnonymous)
+
+방은 `RoomState.settings: RoomSettings` 를 가진다. 현재 필드는 `allowAnonymous: boolean`
+(신규 방 기본값 `true`)이며 확장 가능하다.
+
+- **변경**: `updateSettings { settings: Partial<RoomSettings> }` (Controller 전용). 기존 설정에
+  **부분 병합**하고, `state` 브로드캐스트 + `'settings'` activity 1건(detail = 전달된 `settings`)을 남긴다.
+- **익명 콘텐츠 제한**: `allowAnonymous === false` 이면 **콘텐츠 액션**(`changeTrack`/`enqueueTrack`/`nextTrack`)은
+  **닉네임 없는 소켓**에서 `{ ok:false, error:'nickname required' }` 로 거부된다(권한 검사 통과 후 적용).
+- **게이트 제외(잠금 방지)**: `updateSettings`, `setVolume`, `togglePlay`, `seekTo`, `trackEnded`,
+  `progress` 는 제한하지 않는다. 특히 `updateSettings` 는 항상 열려 있어, 닉네임이 없어도 설정을
+  되돌릴 수 있으므로 방이 스스로 잠기는 일이 없다. 저위험 제어(`setVolume`/`togglePlay`/`seekTo`)도 계속 열려 있다.
+- **Controller UI**: `/controller` 의 **설정 섹션**에 "익명 허용 (allowAnonymous)" 체크박스를 둔다.
+  변경 시 `updateSettings({ allowAnonymous })` 를 호출하고, `false` 일 때
+  "닉네임이 있어야 곡을 변경할 수 있어요" 힌트를 표시한다.
 
 ## 페어링(룸 코드) 규칙
 

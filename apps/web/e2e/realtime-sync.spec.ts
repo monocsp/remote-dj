@@ -268,3 +268,34 @@ test('SEEK-06/01 progress shows seek bar + controller seek is logged', async ({ 
 
   await Promise.all([playerCtx.close(), ctxA.close()]);
 });
+
+// SET-01: Controller A toggles allowAnonymous off → Controller B's settings UI
+// reflects it (checkbox becomes unchecked + the nickname hint appears). Verifies
+// updateSettings broadcasts and the controller settings UI renders state.
+test('SET-01 allowAnonymous toggle syncs to other controller UI', async ({ browser }) => {
+  const room = uniqueRoom();
+
+  const ctxA = await browser.newContext();
+  const ctxB = await browser.newContext();
+
+  const a = await openRoom(ctxA, 'controller', room, 'A');
+  const b = await openRoom(ctxB, 'controller', room, 'B');
+
+  const checkboxA = a.getByRole('checkbox', { name: /익명 허용/ });
+  const checkboxB = b.getByRole('checkbox', { name: /익명 허용/ });
+
+  // Default allowAnonymous=true → both controllers show the box checked.
+  await expect(checkboxA).toBeChecked({ timeout: 15_000 });
+  await expect(checkboxB).toBeChecked({ timeout: 15_000 });
+
+  // A turns anonymity off.
+  await checkboxA.uncheck();
+
+  // B's UI reflects it: box unchecked + hint visible.
+  await expect(checkboxB).not.toBeChecked({ timeout: 15_000 });
+  await expect(b.getByText('닉네임이 있어야 곡을 변경할 수 있어요')).toBeVisible({
+    timeout: 15_000,
+  });
+
+  await Promise.all([ctxA.close(), ctxB.close()]);
+});

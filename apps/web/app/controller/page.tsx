@@ -13,6 +13,7 @@ import {
   useLastError,
   useProgress,
   useQueue,
+  useSettings,
   useVolume,
 } from '@/lib/roomStore';
 import { useSearchParams } from 'next/navigation';
@@ -46,6 +47,7 @@ function ControllerInner() {
   const isPlaying = useIsPlaying();
   const track = useCurrentTrack();
   const queue = useQueue();
+  const settings = useSettings();
   const stateVolume = useVolume();
   const progress = useProgress();
 
@@ -150,6 +152,23 @@ function ControllerInner() {
         )}
 
         <EnqueueForm onSubmit={actions.enqueueTrack} />
+      </section>
+
+      {/* settings (설정) */}
+      <section className="rounded-xl bg-neutral-900 p-4">
+        <h2 className="mb-3 text-sm font-semibold text-neutral-300">설정</h2>
+        <label className="flex items-center gap-2 text-sm text-neutral-200">
+          <input
+            type="checkbox"
+            checked={settings?.allowAnonymous ?? true}
+            onChange={(e) => void actions.updateSettings({ allowAnonymous: e.target.checked })}
+            className="h-4 w-4 accent-emerald-500"
+          />
+          익명 허용 (allowAnonymous)
+        </label>
+        {settings?.allowAnonymous === false && (
+          <p className="mt-2 text-xs text-amber-400">닉네임이 있어야 곡을 변경할 수 있어요</p>
+        )}
       </section>
 
       {/* volume + play/pause */}

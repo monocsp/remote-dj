@@ -144,6 +144,24 @@ export function createServer(store: RoomStore = new InMemoryRoomStore()): {
       return data.roomCode;
     }
 
+    /**
+     * Anonymity gate for CONTENT actions (changeTrack/enqueueTrack/nextTrack).
+     * When a room has settings.allowAnonymous === false and this socket has no
+     * nickname, ack { ok:false, error:'nickname required' } and return true.
+     * Applied AFTER requireController so authorization is checked first. NOT
+     * applied to setVolume/togglePlay/seekTo/updateSettings/trackEnded/progress
+     * — that keeps low-stakes controls open and (critically) updateSettings
+     * editable so the room can never lock itself out.
+     */
+    async function anonymityBlocked(room: string, ack: AckFn): Promise<boolean> {
+      const record = await store.getOrCreate(room);
+      if (record.state.settings.allowAnonymous === false && !data.nickname) {
+        ack({ ok: false, error: 'nickname required' });
+        return true;
+      }
+      return false;
+    }
+
     socket.on(C2S.Join, async (payload: JoinPayload, ack: AckFn) => {
       const { roomCode, role, nickname, password } = payload ?? ({} as JoinPayload);
       if (!roomCode || !role) {
@@ -216,6 +234,7 @@ export function createServer(store: RoomStore = new InMemoryRoomStore()): {
     socket.on(C2S.ChangeTrack, async (payload: ChangeTrackPayload, ack: AckFn) => {
       const room = requireController(ack);
       if (!room) return;
+      if (await anonymityBlocked(room, ack)) return;
       const { url, reason, title } = payload ?? ({} as ChangeTrackPayload);
 
       if (
@@ -299,6 +318,7 @@ export function createServer(store: RoomStore = new InMemoryRoomStore()): {
     socket.on(C2S.EnqueueTrack, async (payload: EnqueueTrackPayload, ack: AckFn) => {
       const room = requireController(ack);
       if (!room) return;
+      if (await anonymityBlocked(room, ack)) return;
       const { url, reason, title } = payload ?? ({} as EnqueueTrackPayload);
 
       if (
@@ -355,6 +375,7 @@ export function createServer(store: RoomStore = new InMemoryRoomStore()): {
     socket.on(C2S.NextTrack, async (payload: NextTrackPayload, ack: AckFn) => {
       const room = requireController(ack);
       if (!room) return;
+      if (await anonymityBlocked(room, ack)) return;
       const { reason } = payload ?? ({} as NextTrackPayload);
       if (!withinLimit(reason, LIMITS.reason)) {
         ack({ ok: false, error: 'input too long' });

@@ -466,4 +466,93 @@ describe('remote-dj server', () => {
     expect(ack.ok).toBe(false);
     expect(ack.error).toBe('player only');
   });
+
+  // ── SET-xx: settings / allowAnonymous enforcement ──────────────────────────
+
+  it('SET-01 updateSettings broadcasts new settings + logs a settings activity', async () => {
+    const room = 'SET01';
+    const controller = connect();
+    const observer = connect();
+    await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+    await observer.emitWithAck(C2S.Join, { roomCode: room, role: 'player' });
+
+    const settingsOff = (s: RoomState) => s.settings.allowAnonymous === false;
+    const isSettings = (a: ActivityEntry) => a.type === 'settings';
+    const obsState = waitFor<RoomState>(observer, S2C.State, settingsOff);
+    const obsActivity = waitFor<ActivityEntry>(observer, S2C.Activity, isSettings);
+
+    const ack = (await controller.emitWithAck(C2S.UpdateSettings, {
+      settings: { allowAnonymous: false },
+    })) as Ack;
+    expect(ack.ok).toBe(true);
+
+    const [os, oa] = await Promise.all([obsState, obsActivity]);
+    expect(os.settings.allowAnonymous).toBe(false);
+    expect(oa.type).toBe('settings');
+  });
+
+  it('SET-02 rejects an anonymous controller changeTrack when allowAnonymous=false', async () => {
+    const room = 'SET02';
+    const controller = connect(); // joins WITHOUT a nickname → anonymous
+    await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+
+    const settingsAck = (await controller.emitWithAck(C2S.UpdateSettings, {
+      settings: { allowAnonymous: false },
+    })) as Ack;
+    expect(settingsAck.ok).toBe(true);
+
+    const ack = (await controller.emitWithAck(C2S.ChangeTrack, {
+      url: VALID_URL,
+      reason: 'set the vibe',
+    })) as Ack;
+    expect(ack.ok).toBe(false);
+    expect(ack.error).toBe('nickname required');
+  });
+
+  it('SET-03 allows a controller WITH a nickname to changeTrack when allowAnonymous=false', async () => {
+    const room = 'SET03';
+    const named = connect();
+    const anon = connect();
+    // A named controller flips the setting; a different anon controller can't,
+    // but the named one can still change tracks.
+    await named.emitWithAck(C2S.Join, { roomCode: room, role: 'controller', nickname: 'dj' });
+    await anon.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+
+    const settingsAck = (await named.emitWithAck(C2S.UpdateSettings, {
+      settings: { allowAnonymous: false },
+    })) as Ack;
+    expect(settingsAck.ok).toBe(true);
+
+    const hasTrack = (s: RoomState) => s.currentTrack?.id === 'dQw4w9WgXcQ';
+    const namedState = waitFor<RoomState>(named, S2C.State, hasTrack);
+
+    const ack = (await named.emitWithAck(C2S.ChangeTrack, {
+      url: VALID_URL,
+      reason: 'i have a nickname',
+    })) as Ack;
+    expect(ack.ok).toBe(true);
+
+    const s = await namedState;
+    expect(s.currentTrack?.id).toBe('dQw4w9WgXcQ');
+  });
+
+  it('SET-04 setVolume from an anonymous controller still works when allowAnonymous=false (not gated)', async () => {
+    const room = 'SET04';
+    const controller = connect(); // anonymous
+    await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+
+    const settingsAck = (await controller.emitWithAck(C2S.UpdateSettings, {
+      settings: { allowAnonymous: false },
+    })) as Ack;
+    expect(settingsAck.ok).toBe(true);
+
+    const hasVolume = (s: RoomState) => s.volume === 42;
+    const statePromise = waitFor<RoomState>(controller, S2C.State, hasVolume);
+
+    const ack = (await controller.emitWithAck(C2S.SetVolume, { volume: 42 })) as Ack;
+    expect(ack.ok).toBe(true);
+
+    const state = await statePromise;
+    expect(state.volume).toBe(42);
+  });
 });

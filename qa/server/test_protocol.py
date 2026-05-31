@@ -29,6 +29,7 @@ from contract import (
     SET_VOLUME,
     TOGGLE_PLAY,
     TRACK_ENDED,
+    UPDATE_SETTINGS,
 )
 
 ROOM_CHARSET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
@@ -444,3 +445,58 @@ def test_SEEK_08_progress_player_only(make_client):
     ack = c.call(PROGRESS, {"currentTime": 1, "duration": 100})
     assert ack["ok"] is False
     assert ack.get("error") == "player only"
+
+
+# ── SET-01: updateSettings broadcasts new settings + logs settings activity ─
+def test_SET_01_update_settings_broadcasts(make_client):
+    controller = make_client()
+    observer = make_client()
+    room = room_code()
+    controller.join(room)
+    observer.join(room, role="player")
+    observer.states.clear()
+    observer.activities.clear()
+    ack = controller.call(UPDATE_SETTINGS, {"settings": {"allowAnonymous": False}})
+    assert ack["ok"] is True
+    observer.wait_event(3.0)
+    st = observer.last_state()
+    assert st is not None
+    assert st["settings"]["allowAnonymous"] is False
+    assert any(a["type"] == "settings" for a in observer.activities)
+
+
+# ── SET-02: anon controller's changeTrack rejected when allowAnonymous=false ─
+def test_SET_02_anon_change_track_rejected(make_client):
+    c = make_client()  # joins WITHOUT a nickname → anonymous
+    room = room_code()
+    c.join(room)
+    assert c.call(UPDATE_SETTINGS, {"settings": {"allowAnonymous": False}})["ok"] is True
+    ack = c.call(CHANGE_TRACK, {"url": VALID_URL, "reason": "set the vibe"})
+    assert ack["ok"] is False
+    assert ack.get("error") == "nickname required"
+
+
+# ── SET-03: a nicknamed controller can changeTrack when allowAnonymous=false ─
+def test_SET_03_named_change_track_ok(make_client):
+    named = make_client()
+    room = room_code()
+    named.join(room, nickname="dj")
+    assert named.call(UPDATE_SETTINGS, {"settings": {"allowAnonymous": False}})["ok"] is True
+    named.states.clear()
+    ack = named.call(CHANGE_TRACK, {"url": VALID_URL, "reason": "i have a nickname"})
+    assert ack["ok"] is True
+    named.wait_event(3.0)
+    assert named.last_state()["currentTrack"]["id"] == VALID_ID
+
+
+# ── SET-04: setVolume from an anon controller is NOT gated (no lockout) ──────
+def test_SET_04_anon_set_volume_not_gated(make_client):
+    c = make_client()  # anonymous
+    room = room_code()
+    c.join(room)
+    assert c.call(UPDATE_SETTINGS, {"settings": {"allowAnonymous": False}})["ok"] is True
+    c.states.clear()
+    ack = c.call(SET_VOLUME, {"volume": 42})
+    assert ack["ok"] is True
+    c.wait_event(3.0)
+    assert c.last_state()["volume"] == 42
