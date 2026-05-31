@@ -10,7 +10,8 @@
     "NextTrack": "nextTrack",
     "TrackEnded": "trackEnded",
     "SeekTo": "seekTo",
-    "Progress": "progress"
+    "Progress": "progress",
+    "PlaybackError": "playbackError"
   },
   "s2c": {
     "State": "state",

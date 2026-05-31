@@ -135,6 +135,10 @@ export const actions = {
     if (!socket) return Promise.resolve(DISCONNECTED_ACK);
     return socket.emitWithAck(C2S.Progress, { currentTime, duration });
   },
+  playbackError(code: number): Promise<Ack> {
+    if (!socket) return Promise.resolve(DISCONNECTED_ACK);
+    return socket.emitWithAck(C2S.PlaybackError, { code });
+  },
 } as const;
 
 // ── Fine-grained selector hooks ──────────────────────────────────────────────
@@ -150,5 +154,6 @@ export const useQueue = () => useStore(store, (s) => s.state?.queue ?? EMPTY_QUE
 export const useSettings = () => useStore(store, (s) => s.state?.settings ?? null);
 export const useProgress = () => useStore(store, (s) => s.state?.progress ?? null);
 export const useLastSeek = () => useStore(store, (s) => s.state?.lastSeek ?? null);
+export const usePlaybackError = () => useStore(store, (s) => s.state?.playbackError ?? null);
 export const useActivityLog = () => useStore(store, (s) => s.log);
 export const useLastError = () => useStore(store, (s) => s.lastError);

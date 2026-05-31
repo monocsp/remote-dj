@@ -11,6 +11,7 @@ import {
   useCurrentTrack,
   useIsPlaying,
   useLastError,
+  usePlaybackError,
   useProgress,
   useQueue,
   useSettings,
@@ -50,6 +51,7 @@ function ControllerInner() {
   const settings = useSettings();
   const stateVolume = useVolume();
   const progress = useProgress();
+  const playbackError = usePlaybackError();
 
   // Local mirror of the volume slider; synced to authoritative state.
   const [vol, setVol] = useState(100);
@@ -101,6 +103,11 @@ function ControllerInner() {
           >
             {track.url}
           </a>
+        )}
+        {playbackError && (
+          <p className="mt-2 rounded-lg bg-red-950/60 px-3 py-2 text-xs font-semibold text-red-300">
+            ⚠ Player 재생 오류 (코드 {playbackError.code})
+          </p>
         )}
       </section>
 

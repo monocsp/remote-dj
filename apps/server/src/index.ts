@@ -9,6 +9,7 @@ import {
   type JoinPayload,
   LIMITS,
   type NextTrackPayload,
+  type PlaybackErrorPayload,
   type ProgressPayload,
   type RemoveQueuedPayload,
   type Role,
@@ -261,7 +262,7 @@ export function createServer(store: RoomStore = new InMemoryRoomStore()): {
         title: title ?? null,
         addedBy: data.nickname ?? null,
       };
-      await store.patchState(room, { currentTrack: track, isPlaying: true });
+      await store.patchState(room, { currentTrack: track, isPlaying: true, playbackError: null });
       await recordActivity('track_change', reason.trim(), { id, url, title: track.title });
       ack({ ok: true });
       await broadcastState(room);
@@ -391,7 +392,12 @@ export function createServer(store: RoomStore = new InMemoryRoomStore()): {
       }
 
       const [head, ...rest] = queue;
-      await store.patchState(room, { currentTrack: head, queue: rest, isPlaying: true });
+      await store.patchState(room, {
+        currentTrack: head,
+        queue: rest,
+        isPlaying: true,
+        playbackError: null,
+      });
       await recordActivity('skip', reason?.trim() || null, { id: head.id });
       ack({ ok: true });
       await broadcastState(room);
@@ -413,7 +419,12 @@ export function createServer(store: RoomStore = new InMemoryRoomStore()): {
       }
 
       const [head, ...rest] = queue;
-      await store.patchState(room, { currentTrack: head, queue: rest, isPlaying: true });
+      await store.patchState(room, {
+        currentTrack: head,
+        queue: rest,
+        isPlaying: true,
+        playbackError: null,
+      });
       await recordActivity('skip', null, { auto: true });
       ack({ ok: true });
       await broadcastState(room);
@@ -457,6 +468,21 @@ export function createServer(store: RoomStore = new InMemoryRoomStore()): {
       // High-frequency report: update state but DO NOT log an activity entry
       // (would spam the log; Player throttles to ~2s).
       await store.patchState(room, { progress: { currentTime, duration, ts: Date.now() } });
+      ack({ ok: true });
+      await broadcastState(room);
+    });
+
+    socket.on(C2S.PlaybackError, async (payload: PlaybackErrorPayload, ack: AckFn) => {
+      const room = requirePlayer(ack);
+      if (!room) return;
+      const { code } = payload ?? ({} as PlaybackErrorPayload);
+      if (typeof code !== 'number' || !Number.isFinite(code)) {
+        ack({ ok: false, error: 'invalid code' });
+        return;
+      }
+
+      // A status, surfaced via RoomState only (like progress) — NOT logged.
+      await store.patchState(room, { playbackError: { code, ts: Date.now() } });
       ack({ ok: true });
       await broadcastState(room);
     });

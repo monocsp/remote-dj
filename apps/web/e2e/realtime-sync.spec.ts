@@ -43,7 +43,12 @@ async function mockYouTube(context: BrowserContext): Promise<void> {
     // Stored playback position the Player reports as progress.
     w.__ytTime = 12;
     class FakePlayer {
-      constructor(_el: HTMLElement, opts: { events?: { onReady?: () => void } }) {
+      constructor(
+        _el: HTMLElement,
+        opts: { events?: { onReady?: () => void; onError?: (e: { data: number }) => void } },
+      ) {
+        // Let tests drive a YouTube error event from the page context.
+        w.__ytFireError = (code: number) => opts?.events?.onError?.({ data: code });
         // Signal ready on next tick so the page wires up state effects.
         setTimeout(() => opts?.events?.onReady?.(), 0);
       }
@@ -70,7 +75,7 @@ async function mockYouTube(context: BrowserContext): Promise<void> {
         w.__ytTime = sec;
       }
     }
-    w.YT = { Player: FakePlayer };
+    w.YT = { Player: FakePlayer, PlayerState: { ENDED: 0, PLAYING: 1 } };
   });
 
   // Neutralize the real IFrame API script and immediately fire the ready hook.
@@ -298,4 +303,31 @@ test('SET-01 allowAnonymous toggle syncs to other controller UI', async ({ brows
   });
 
   await Promise.all([ctxA.close(), ctxB.close()]);
+});
+
+// ERR-01: a mocked Player fires a YouTube playback error → the Controller shows
+// the 재생 오류 indicator near now-playing. Drives the full player → server →
+// controller path via the browser only.
+test('ERR-01 player playback error surfaces on the controller', async ({ browser }) => {
+  const room = uniqueRoom();
+
+  const playerCtx = await browser.newContext();
+  await mockYouTube(playerCtx);
+  const ctxA = await browser.newContext();
+
+  const player = await openRoom(playerCtx, 'player', room);
+  const a = await openRoom(ctxA, 'controller', room, 'A');
+
+  // Load a track so there's a now-playing context.
+  await changeTrack(a, VALID_URL, '오류 테스트');
+  await expect(a.getByRole('link', { name: VALID_URL })).toBeVisible({ timeout: 15_000 });
+
+  // Fire a YouTube error (100 = not found) from the mocked Player.
+  // biome-ignore lint/suspicious/noExplicitAny: test stub
+  await player.evaluate(() => (window as any).__ytFireError(100));
+
+  // The Controller surfaces the error indicator.
+  await expect(a.getByText(/재생 오류/)).toBeVisible({ timeout: 15_000 });
+
+  await Promise.all([playerCtx.close(), ctxA.close()]);
 });

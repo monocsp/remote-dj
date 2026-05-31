@@ -11,7 +11,7 @@ import {
   useVolume,
 } from '@/lib/roomStore';
 import { useSearchParams } from 'next/navigation';
-import { Suspense, useEffect, useRef } from 'react';
+import { Suspense, useEffect, useRef, useState } from 'react';
 
 // NOTE: YouTube login is handled in the phone's own browser session — the
 // Player must be signed into YouTube in this browser for playback to work.
@@ -39,6 +39,7 @@ interface YTNamespace {
       events?: {
         onReady?: () => void;
         onStateChange?: (event: YTStateChangeEvent) => void;
+        onError?: (event: { data: number }) => void;
       };
     },
   ) => YTPlayer;
@@ -52,6 +53,23 @@ declare global {
 }
 
 const IFRAME_API_SRC = 'https://www.youtube.com/iframe_api';
+
+/** Map a YouTube IFrame API error code to a Korean message. */
+function playbackErrorMessage(code: number): string {
+  switch (code) {
+    case 2:
+      return '잘못된 영상 링크';
+    case 5:
+      return 'HTML5 재생 오류';
+    case 100:
+      return '영상을 찾을 수 없음';
+    case 101:
+    case 150:
+      return '임베드가 비활성화된 영상';
+    default:
+      return '재생 오류';
+  }
+}
 
 function PlayerInner() {
   const params = useSearchParams();
@@ -71,6 +89,9 @@ function PlayerInner() {
   const stateIsPlaying = useIsPlaying();
   const stateVolume = useVolume();
   const lastSeek = useLastSeek();
+
+  // Latest local YouTube playback error code (null = no current error).
+  const [errorCode, setErrorCode] = useState<number | null>(null);
 
   const containerRef = useRef<HTMLDivElement | null>(null);
   const playerRef = useRef<YTPlayer | null>(null);
@@ -105,6 +126,15 @@ function PlayerInner() {
               // Any non-ENDED state (e.g. a freshly-loaded next track) re-arms.
               endedRef.current = false;
             }
+            // Successful playback clears any local error banner.
+            if (event.data === window.YT?.PlayerState.PLAYING) {
+              setErrorCode(null);
+            }
+          },
+          onError: (event) => {
+            // Surface locally + report to the room (player-only status).
+            setErrorCode(event.data);
+            void actions.playbackError(event.data);
           },
         },
       });
@@ -188,6 +218,23 @@ function PlayerInner() {
       <div className="aspect-video w-full overflow-hidden rounded-xl bg-black">
         <div ref={containerRef} className="h-full w-full" />
       </div>
+
+      {errorCode !== null && (
+        <div className="flex flex-col gap-3 rounded-xl bg-red-950/60 p-4 text-sm text-red-300">
+          <p className="font-semibold">
+            ⚠ {playbackErrorMessage(errorCode)} (코드 {errorCode})
+          </p>
+          <button
+            type="button"
+            onClick={() => {
+              if (currentTrack) playerRef.current?.loadVideoById(currentTrack.id);
+            }}
+            className="self-start rounded-lg bg-red-500 px-4 py-2 text-sm font-bold text-neutral-950"
+          >
+            다시 시도
+          </button>
+        </div>
+      )}
 
       <div className="rounded-xl bg-neutral-900 p-4">
         <p className="text-xs uppercase tracking-wide text-neutral-500">현재 곡</p>

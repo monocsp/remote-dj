@@ -37,6 +37,7 @@
 | [track-change.md](./track-change.md) | 곡 변경(사유 필수, URL 검증, 브로드캐스트/로그) | `TRK-` |
 | [queue.md](./queue.md) | 재생 큐(추가/제거/다음/자동 진행, 권한) | `QUEUE-` |
 | [seek.md](./seek.md) | 탐색(seekTo)/진행상황(progress, 비로그, 권한) | `SEEK-` |
+| [playback-error.md](./playback-error.md) | YouTube 재생 오류/복구(playbackError, 비로그, 새 곡 시 초기화, 권한) | `ERR-` |
 | [volume-playback.md](./volume-playback.md) | 음량 클램프 / 재생·일시정지 / 권한 | `VOL-`, `PLY-` |
 | [activity-log.md](./activity-log.md) | 모든 조작 로깅 / join 시 전체 로그 / 캡 | `LOG-` |
 | [realtime-invariants.md](./realtime-invariants.md) | 멀티 컨트롤러 동기화 / 방 격리 / presence / version / 재연결 / 입력 길이 | `RT-` |

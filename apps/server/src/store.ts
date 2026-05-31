@@ -39,6 +39,7 @@ function createInitialState(roomCode: string): RoomState {
     stateVersion: 0,
     progress: null,
     lastSeek: null,
+    playbackError: null,
   };
 }
 

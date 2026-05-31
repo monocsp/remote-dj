@@ -31,6 +31,8 @@ export interface RoomState {
   progress: { currentTime: number; duration: number; ts: number } | null;
   // Latest seek command the Player should apply; null initially.
   lastSeek: { seconds: number; ts: number } | null;
+  // Latest player-reported playback error; null when none / cleared on a new track.
+  playbackError: { code: number; ts: number } | null;
 }
 
 export type ActivityType =
@@ -112,6 +114,11 @@ export interface ProgressPayload {
   duration: number;
 }
 
+// Player reports a YouTube playback error (IFrame API error code). Player-only.
+export interface PlaybackErrorPayload {
+  code: number;
+}
+
 export interface Ack {
   ok: boolean;
   error?: string;
@@ -130,6 +137,7 @@ export const C2S = {
   TrackEnded: 'trackEnded',
   SeekTo: 'seekTo',
   Progress: 'progress',
+  PlaybackError: 'playbackError',
 } as const;
 
 export const S2C = {

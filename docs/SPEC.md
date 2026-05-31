@@ -57,6 +57,7 @@ type Role = 'player' | 'controller';
 | `trackEnded` | C→S | `{}` | **Player 전용**(controller가 발행 시 `{ ok:false, error:'player only' }`). 자동 next처럼 동작: 큐 있으면 승격(activity `skip`, detail `{auto:true}`), 비어있으면 `isPlaying:false` |
 | `seekTo` | C→S | `{ seconds: number; reason?: string }` | **Controller 전용**. `seconds` 가 유한수 `>= 0` 가 아니면 `{ ok:false, error:'invalid seconds' }`. `lastSeek` 갱신, activity `seek`, detail `{seconds}`. **사유 선택** |
 | `progress` | C→S | `{ currentTime: number; duration: number }` | **Player 전용**(controller가 발행 시 `{ ok:false, error:'player only' }`). `currentTime`/`duration` 이 유한수 `>= 0` 가 아니면 `{ ok:false, error:'invalid progress' }`. `progress` 갱신 + 브로드캐스트. **로그 기록 안 함**(고빈도) |
+| `playbackError` | C→S | `{ code: number }` | **Player 전용**(controller가 발행 시 `{ ok:false, error:'player only' }`). `code` 가 유한수가 아니면 `{ ok:false, error:'invalid code' }`. `playbackError = { code, ts }` 갱신 + 브로드캐스트. **로그 기록 안 함**(상태로만 노출). 새 곡 시도 시 초기화 |
 | `state` | S→C | `RoomState` | join 직후 + 모든 변경 후 브로드캐스트 |
 | `activity` | S→C | `ActivityEntry` | 신규 항목 1건 |
 | `activityLog` | S→C | `ActivityEntry[]` | join 직후 전체 로그 |
@@ -92,6 +93,8 @@ interface RoomState {
   progress: { currentTime: number; duration: number; ts: number } | null;
   // Player가 적용해야 할 최신 seek 명령(초기 null)
   lastSeek: { seconds: number; ts: number } | null;
+  // 최신 Player 보고 재생 오류(없거나 새 곡 시도 시 null)
+  playbackError: { code: number; ts: number } | null;
 }
 
 type ActivityType =
@@ -137,6 +140,19 @@ interface ActivityEntry {
 - **`seekTo` 는 Controller 전용**이며 사유는 선택(비면 `reason: null`). player가 발행하면 ack `{ ok:false, error:'controllers only' }`.
 - Player는 수신한 `state.lastSeek` 를 보고 해당 위치로 탐색을 적용한다.
 - 매 `progress` 보고는 `stateVersion` 을 증가시키고 `state` 를 브로드캐스트한다(허용 — Player가 throttle).
+
+## 재생 오류(Playback Error) / 복구
+
+방은 `RoomState.playbackError`(Player가 보고한 최신 YouTube 재생 오류)를 가진다. 신규 방은 `null` 로 시작한다.
+
+| 동작 | 발행자 | 사유 | 효과 |
+| --- | --- | --- | --- |
+| `playbackError` | **Player 전용** | 없음 | `code` 가 유한수인지 검증(아니면 `invalid code`). `playbackError = { code, ts }` 로 갱신 + 브로드캐스트 |
+
+- **`playbackError` 는 Player 전용**이며 **Activity Log에 기록하지 않는다** — `progress` 와 동일하게 **상태(`RoomState.playbackError`)로만** 노출되는 status 다. controller가 발행하면 ack `{ ok:false, error:'player only' }`.
+- **새 곡 시도 시 초기화**: `changeTrack`, `nextTrack`(큐 승격 시), `trackEnded`(다음 곡 승격 시) 의 `patchState` 에서 `playbackError: null` 로 비운다. 그 외에서는 비우지 않는다.
+- **Player UI**: onError 발생 시 코드별 한국어 메시지 + "다시 시도" 버튼(`loadVideoById` 재시도) 배너를 띄우고, 정상 재생(`PLAYING`) 시 배너를 지운다.
+- **Controller UI**: `state.playbackError` 가 있으면 now-playing 근처에 "⚠ Player 재생 오류 (코드 {code})" 경고를 표시한다.
 
 ## 검증 규칙
 
@@ -226,6 +242,7 @@ interface ActivityEntry {
 | `trackEnded` | **O** | X |
 | `seekTo` | X | O |
 | `progress` | **O** | X |
+| `playbackError` | **O** | X |
 
 ## 비범위 (추후)
 

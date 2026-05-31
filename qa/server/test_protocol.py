@@ -23,6 +23,7 @@ from contract import (
     JOIN,
     LIMITS,
     NEXT_TRACK,
+    PLAYBACK_ERROR,
     PROGRESS,
     REMOVE_QUEUED,
     SEEK_TO,
@@ -500,3 +501,46 @@ def test_SET_04_anon_set_volume_not_gated(make_client):
     assert ack["ok"] is True
     c.wait_event(3.0)
     assert c.last_state()["volume"] == 42
+
+
+# ── ERR-01: a Player's playbackError sets broadcast state.playbackError.code ─
+def test_ERR_01_playback_error_sets_state(make_client):
+    controller = make_client()
+    player = make_client()
+    room = room_code()
+    controller.join(room)
+    player.join(room, role="player")
+    controller.states.clear()
+    ack = player.call(PLAYBACK_ERROR, {"code": 100})
+    assert ack["ok"] is True
+    controller.wait_event(3.0)
+    st = controller.last_state()
+    assert st is not None
+    assert st["playbackError"]["code"] == 100
+
+
+# ── ERR-02: a subsequent changeTrack clears playbackError to null ───────────
+def test_ERR_02_change_track_clears_playback_error(make_client):
+    controller = make_client()
+    player = make_client()
+    room = room_code()
+    controller.join(room)
+    player.join(room, role="player")
+    assert player.call(PLAYBACK_ERROR, {"code": 100})["ok"] is True
+    controller.states.clear()
+    assert controller.call(CHANGE_TRACK, {"url": VALID_URL, "reason": "recover"})["ok"] is True
+    controller.wait_event(3.0)
+    st = controller.last_state()
+    assert st is not None
+    assert st["currentTrack"]["id"] == VALID_ID
+    assert st["playbackError"] is None
+
+
+# ── ERR-03: playbackError is player only (controller rejected) ──────────────
+def test_ERR_03_playback_error_player_only(make_client):
+    c = make_client()
+    room = room_code()
+    assert c.join(room)["ok"] is True
+    ack = c.call(PLAYBACK_ERROR, {"code": 100})
+    assert ack["ok"] is False
+    assert ack.get("error") == "player only"

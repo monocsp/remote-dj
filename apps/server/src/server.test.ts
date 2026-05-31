@@ -555,4 +555,60 @@ describe('remote-dj server', () => {
     const state = await statePromise;
     expect(state.volume).toBe(42);
   });
+
+  // ── ERR-xx: YouTube playback error / recovery ───────────────────────────────
+
+  it('ERR-01 a player playbackError sets broadcast state.playbackError.code', async () => {
+    const room = 'ERR01';
+    const controller = connect();
+    const player = connect();
+    await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+    await player.emitWithAck(C2S.Join, { roomCode: room, role: 'player' });
+
+    const hasError = (s: RoomState) => s.playbackError?.code === 100;
+    const controllerState = waitFor<RoomState>(controller, S2C.State, hasError);
+
+    const ack = (await player.emitWithAck(C2S.PlaybackError, { code: 100 })) as Ack;
+    expect(ack.ok).toBe(true);
+
+    const cs = await controllerState;
+    expect(cs.playbackError?.code).toBe(100);
+  });
+
+  it('ERR-02 a subsequent changeTrack clears playbackError to null', async () => {
+    const room = 'ERR02';
+    const controller = connect();
+    const player = connect();
+    await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+    await player.emitWithAck(C2S.Join, { roomCode: room, role: 'player' });
+
+    const errored = waitFor<RoomState>(controller, S2C.State, (s) => s.playbackError?.code === 100);
+    const errAck = (await player.emitWithAck(C2S.PlaybackError, { code: 100 })) as Ack;
+    expect(errAck.ok).toBe(true);
+    await errored;
+
+    const cleared = waitFor<RoomState>(
+      controller,
+      S2C.State,
+      (s) => s.currentTrack?.id === 'dQw4w9WgXcQ',
+    );
+    const ack = (await controller.emitWithAck(C2S.ChangeTrack, {
+      url: VALID_URL,
+      reason: 'recover',
+    })) as Ack;
+    expect(ack.ok).toBe(true);
+
+    const cs = await cleared;
+    expect(cs.playbackError).toBeNull();
+  });
+
+  it('ERR-03 rejects playbackError from a controller (player-only)', async () => {
+    const room = 'ERR03';
+    const controller = connect();
+    await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+
+    const ack = (await controller.emitWithAck(C2S.PlaybackError, { code: 100 })) as Ack;
+    expect(ack.ok).toBe(false);
+    expect(ack.error).toBe('player only');
+  });
 });
