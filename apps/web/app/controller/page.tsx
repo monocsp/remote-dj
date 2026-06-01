@@ -65,6 +65,14 @@ function ControllerInner() {
   useEffect(() => {
     setSeekPos(progressCurrent);
   }, [progressCurrent]);
+
+  // Optimistic mirror of the allowAnonymous toggle so the checkbox flips
+  // immediately on tap (the server round-trip then confirms it).
+  const [anon, setAnon] = useState(true);
+  const settingsAnon = settings?.allowAnonymous ?? true;
+  useEffect(() => {
+    setAnon(settingsAnon);
+  }, [settingsAnon]);
   // Duration when the player has reported real progress, else null (no bar).
   const duration = progress != null && progress.duration > 0 ? progress.duration : null;
 
@@ -167,13 +175,16 @@ function ControllerInner() {
         <label className="flex items-center gap-2 text-sm text-neutral-200">
           <input
             type="checkbox"
-            checked={settings?.allowAnonymous ?? true}
-            onChange={(e) => void actions.updateSettings({ allowAnonymous: e.target.checked })}
+            checked={anon}
+            onChange={(e) => {
+              setAnon(e.target.checked);
+              void actions.updateSettings({ allowAnonymous: e.target.checked });
+            }}
             className="h-4 w-4 accent-emerald-500"
           />
           익명 허용 (allowAnonymous)
         </label>
-        {settings?.allowAnonymous === false && (
+        {!anon && (
           <p className="mt-2 text-xs text-amber-400">닉네임이 있어야 곡을 변경할 수 있어요</p>
         )}
       </section>
