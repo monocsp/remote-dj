@@ -41,7 +41,7 @@ function ControllerInner() {
         </span>
       </header>
 
-      <ControlPanel variant="guest" />
+      <ControlPanel variant="guest" myNick={nick} />
     </main>
   );
 }

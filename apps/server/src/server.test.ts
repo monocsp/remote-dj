@@ -410,20 +410,100 @@ describe('remote-dj server', () => {
     expect(ack.ok).toBe(true);
   });
 
-  it('removeQueued (player) with an out-of-range index acks false; controller rejected', async () => {
+  it('removeQueued with an out-of-range index acks false (invalid index) for both roles', async () => {
     const room = 'QUEUE4';
     const controller = connect();
     const player = connect();
     await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
     await player.emitWithAck(C2S.Join, { roomCode: room, role: 'player' });
 
+    // removeQueued is now a member action (controller OR player); the range
+    // check runs before ownership, so an out-of-range index is 'invalid index'.
     const rejected = (await controller.emitWithAck(C2S.RemoveQueued, { index: 5 })) as Ack;
     expect(rejected.ok).toBe(false);
-    expect(rejected.error).toBe('player only');
+    expect(rejected.error).toBe('invalid index');
 
     const ack = (await player.emitWithAck(C2S.RemoveQueued, { index: 5 })) as Ack;
     expect(ack.ok).toBe(false);
     expect(ack.error).toBe('invalid index');
+  });
+
+  it('REMOVE-OWN a controller may remove a queued item it added (ownership)', async () => {
+    const room = 'RMOWN';
+    const SECOND_URL = 'https://youtu.be/9bZkp7q19f0';
+    const controllerA = connect();
+    const player = connect();
+    await controllerA.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+    await player.emitWithAck(C2S.Join, { roomCode: room, role: 'player' });
+
+    // Establish a playing current track so the next enqueue queues (not auto-start).
+    const hasA = waitFor<RoomState>(player, S2C.State, (s) => s.currentTrack?.id === 'dQw4w9WgXcQ');
+    await controllerA.emitWithAck(C2S.ChangeTrack, { url: VALID_URL, reason: 'A' });
+    await hasA;
+
+    const queued = waitFor<RoomState>(player, S2C.State, (s) =>
+      s.queue.some((t) => t.id === '9bZkp7q19f0'),
+    );
+    await controllerA.emitWithAck(C2S.EnqueueTrack, { url: SECOND_URL });
+    const qs = await queued;
+    // The enqueued item is owned by controllerA's socket.
+    expect(qs.queue[0]?.ownerId).toBe(controllerA.id);
+
+    const removed = waitFor<RoomState>(player, S2C.State, (s) => s.queue.length === 0);
+    const ack = (await controllerA.emitWithAck(C2S.RemoveQueued, { index: 0 })) as Ack;
+    expect(ack.ok).toBe(true);
+    expect((await removed).queue.length).toBe(0);
+  });
+
+  it('REMOVE-OTHER a different controller cannot remove an item it did not add', async () => {
+    const room = 'RMOTHER';
+    const SECOND_URL = 'https://youtu.be/9bZkp7q19f0';
+    const controllerA = connect();
+    const controllerB = connect();
+    const player = connect();
+    await controllerA.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+    await controllerB.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+    await player.emitWithAck(C2S.Join, { roomCode: room, role: 'player' });
+
+    const hasA = waitFor<RoomState>(player, S2C.State, (s) => s.currentTrack?.id === 'dQw4w9WgXcQ');
+    await controllerA.emitWithAck(C2S.ChangeTrack, { url: VALID_URL, reason: 'A' });
+    await hasA;
+
+    const queued = waitFor<RoomState>(player, S2C.State, (s) =>
+      s.queue.some((t) => t.id === '9bZkp7q19f0'),
+    );
+    await controllerA.emitWithAck(C2S.EnqueueTrack, { url: SECOND_URL });
+    await queued;
+
+    // controllerB did not add it → rejected.
+    const ack = (await controllerB.emitWithAck(C2S.RemoveQueued, { index: 0 })) as Ack;
+    expect(ack.ok).toBe(false);
+    expect(ack.error).toBe('not your item');
+  });
+
+  it('REMOVE-PLAYER a player may remove any queued item (added by a controller)', async () => {
+    const room = 'RMPLAYER';
+    const SECOND_URL = 'https://youtu.be/9bZkp7q19f0';
+    const controller = connect();
+    const player = connect();
+    await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+    await player.emitWithAck(C2S.Join, { roomCode: room, role: 'player' });
+
+    const hasA = waitFor<RoomState>(player, S2C.State, (s) => s.currentTrack?.id === 'dQw4w9WgXcQ');
+    await controller.emitWithAck(C2S.ChangeTrack, { url: VALID_URL, reason: 'A' });
+    await hasA;
+
+    const queued = waitFor<RoomState>(player, S2C.State, (s) =>
+      s.queue.some((t) => t.id === '9bZkp7q19f0'),
+    );
+    await controller.emitWithAck(C2S.EnqueueTrack, { url: SECOND_URL });
+    await queued;
+
+    // The player (main) may remove any item, even one added by a controller.
+    const removed = waitFor<RoomState>(player, S2C.State, (s) => s.queue.length === 0);
+    const ack = (await player.emitWithAck(C2S.RemoveQueued, { index: 0 })) as Ack;
+    expect(ack.ok).toBe(true);
+    expect((await removed).queue.length).toBe(0);
   });
 
   it('trackEnded from a player advances the queue', async () => {

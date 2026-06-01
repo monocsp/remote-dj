@@ -216,9 +216,10 @@ def test_PLY_03b_controller_rejected_main_events(make_client):
     room = room_code()
     assert c.join(room, role="controller")["ok"] is True
     # MAIN events: player-only. A controller (limited guest) is rejected.
+    # NOTE: removeQueued is NOT here — it is a member action gated by ownership
+    # (covered by RMOWN/RMOTHER/RMPLAYER below), not a flat player-only event.
     for event, payload in [
         (NEXT_TRACK, {}),
-        (REMOVE_QUEUED, {"index": 0}),
         (SET_REPEAT, {"mode": "all"}),
         (SET_SHUFFLE, {"shuffle": True}),
         (SEEK_TO, {"seconds": 10}),
@@ -773,6 +774,65 @@ def test_QUEUE_13_remove_queued_happy_path(make_client):
     assert st is not None
     assert len(st["queue"]) == 1
     assert st["queue"][0]["id"] == third_id
+
+
+# ── RMOWN: a controller may remove a queued item it added (ownership) ───────
+def test_RMOWN_controller_removes_own(make_client):
+    a = make_client()
+    player = make_client()
+    room = room_code()
+    a.join(room, role="controller")
+    player.join(room, role="player")
+    # Establish a playing current track so the next enqueue queues.
+    assert a.call(CHANGE_TRACK, {"url": VALID_URL, "reason": "A"})["ok"] is True
+    player.wait_for_state(lambda s: (s.get("currentTrack") or {}).get("id") == VALID_ID)
+    assert a.call(ENQUEUE_TRACK, {"url": SECOND_URL})["ok"] is True
+    st = player.wait_for_state(lambda s: any(t["id"] == SECOND_ID for t in s.get("queue", [])))
+    assert st is not None
+    # The enqueued item is owned by A's socket.
+    assert st["queue"][0]["ownerId"] == a.sio.get_sid()
+    # A removes its own item → ok.
+    ack = a.call(REMOVE_QUEUED, {"index": 0})
+    assert ack["ok"] is True
+    st = player.wait_for_state(lambda s: len(s.get("queue", [])) == 0)
+    assert st is not None
+
+
+# ── RMOTHER: a different controller cannot remove an item it did not add ─────
+def test_RMOTHER_controller_cannot_remove_other(make_client):
+    a = make_client()
+    b = make_client()
+    player = make_client()
+    room = room_code()
+    a.join(room, role="controller")
+    b.join(room, role="controller")
+    player.join(room, role="player")
+    assert a.call(CHANGE_TRACK, {"url": VALID_URL, "reason": "A"})["ok"] is True
+    player.wait_for_state(lambda s: (s.get("currentTrack") or {}).get("id") == VALID_ID)
+    assert a.call(ENQUEUE_TRACK, {"url": SECOND_URL})["ok"] is True
+    player.wait_for_state(lambda s: any(t["id"] == SECOND_ID for t in s.get("queue", [])))
+    # B did not add it → rejected.
+    ack = b.call(REMOVE_QUEUED, {"index": 0})
+    assert ack["ok"] is False
+    assert ack.get("error") == "not your item"
+
+
+# ── RMPLAYER: the player may remove any queued item (added by a controller) ──
+def test_RMPLAYER_player_removes_any(make_client):
+    controller = make_client()
+    player = make_client()
+    room = room_code()
+    controller.join(room, role="controller")
+    player.join(room, role="player")
+    assert controller.call(CHANGE_TRACK, {"url": VALID_URL, "reason": "A"})["ok"] is True
+    player.wait_for_state(lambda s: (s.get("currentTrack") or {}).get("id") == VALID_ID)
+    assert controller.call(ENQUEUE_TRACK, {"url": SECOND_URL})["ok"] is True
+    player.wait_for_state(lambda s: any(t["id"] == SECOND_ID for t in s.get("queue", [])))
+    # The player (main) may remove any item, even one added by a controller.
+    ack = player.call(REMOVE_QUEUED, {"index": 0})
+    assert ack["ok"] is True
+    st = player.wait_for_state(lambda s: len(s.get("queue", [])) == 0)
+    assert st is not None
 
 
 # ── SEEK-09: invalid progress payloads are rejected ─────────────────────────

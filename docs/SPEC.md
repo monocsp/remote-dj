@@ -56,7 +56,7 @@ type Role = 'player' | 'controller';
 | `togglePlay` | C→S | `{ isPlaying: boolean; reason?: string }` | activity는 `play` 또는 `pause` 로 기록 |
 | `updateSettings` | C→S | `{ settings: Partial<RoomSettings>; reason?: string }` | **Player 전용(메인)**(controller가 발행 시 `{ ok:false, error:'player only' }`). 부분 병합 |
 | `enqueueTrack` | C→S | `{ url: string; reason?: string; title?: string }` | url 파싱 실패 시 `{ ok:false, error:'invalid youtube url' }`; **임베드 불가/이용 불가 영상은 추가 시점에 거부** `{ ok:false, error:'embed disabled' }`(oEmbed 401/404). **사유 선택**. 큐 끝에 추가, activity `enqueue` |
-| `removeQueued` | C→S | `{ index: number; reason?: string }` | **Player 전용(메인)**(controller가 발행 시 `{ ok:false, error:'player only' }`). `index` 가 `[0, queue.length)` 정수가 아니면 `{ ok:false, error:'invalid index' }`. activity `dequeue` |
+| `removeQueued` | C→S | `{ index: number; reason?: string }` | **멤버(Player·Controller 둘 다)**가 발행할 수 있으나 **소유권**으로 제한된다. `index` 가 `[0, queue.length)` 정수가 아니면 `{ ok:false, error:'invalid index' }`. **Player(메인)는 어떤 곡이든 제거 가능**, Controller는 **자신이 추가한 곡만**(소켓 `ownerId` 일치 또는 닉네임이 있고 `addedBy` 일치) 제거 가능 — 아니면 `{ ok:false, error:'not your item' }`. 허용 시 activity `dequeue` |
 | `nextTrack` | C→S | `{ reason?: string }` | **Player 전용(메인)**(controller가 발행 시 `{ ok:false, error:'player only' }`). 큐가 있으면 맨 앞 곡을 `currentTrack` 으로 승격(`isPlaying:true`), activity `skip`. 큐가 비어있으면 `{ ok:true }` no-op. **사유 선택** |
 | `trackEnded` | C→S | `{}` | **Player 전용**(controller가 발행 시 `{ ok:false, error:'player only' }`). 자동 next처럼 동작: 큐 있으면 승격(activity `skip`, detail `{auto:true}`), 비어있으면 `isPlaying:false` |
 | `seekTo` | C→S | `{ seconds: number; reason?: string }` | **Player 전용(메인)**(controller가 발행 시 `{ ok:false, error:'player only' }`). `seconds` 가 유한수 `>= 0` 가 아니면 `{ ok:false, error:'invalid seconds' }`. `lastSeek` 갱신, activity `seek`, detail `{seconds}`. **사유 선택** |
@@ -83,7 +83,9 @@ interface Track {
   id: string;            // YouTube video id
   url: string;
   title: string | null;
-  addedBy: string | null; // null = 익명
+  addedBy: string | null; // null = 익명 (표시용 닉네임)
+  addedAt: number;        // 추가된 시각(epoch ms)
+  ownerId: string;        // 추가한 연결의 불투명 id (소유권 검사용)
 }
 
 interface RoomSettings {
@@ -148,14 +150,14 @@ interface ActivityEntry {
 | 동작 | 발행자 | 사유 | 효과 |
 | --- | --- | --- | --- |
 | `enqueueTrack` | **Player·Controller(게스트-허용)** | **선택** | url 파싱 → `Track {id,url,title,addedBy}` 를 큐 끝에 추가. activity `enqueue`, detail `{id,url,title}`. **단 방이 IDLE(`currentTrack === null`)이면 추가한 곡을 즉시 `currentTrack` 으로 승격하고(`isPlaying:true`, `playbackError:null`) 큐를 비운다 — 빈 플레이어에 곡을 넣으면 바로 재생 시작** |
-| `removeQueued` | **Player 전용(메인)** | **선택** | `index` 위치의 곡 제거(범위 밖이면 `invalid index`). activity `dequeue`, detail `{index}` |
+| `removeQueued` | **멤버(소유권 제한)** | **선택** | `index` 위치의 곡 제거(범위 밖이면 `invalid index`). **Player는 모든 곡, Controller는 자신이 추가한 곡만**(아니면 `not your item`). activity `dequeue`, detail `{index}` |
 | `nextTrack` | **Player 전용(메인)** | **선택** | 큐 맨 앞 곡을 `currentTrack` 으로 승격하고 큐에서 제거, `isPlaying:true`. 큐가 비어있으면 no-op `{ok:true}`. activity `skip`, detail `{id}` |
 | `trackEnded` | **Player 전용** | 없음 | 플레이어가 현재 곡 종료를 보고. 자동 next처럼 동작 — 큐 있으면 승격(activity `skip`, detail `{auto:true}`), 비어있으면 `isPlaying:false` |
 
 - **사유 정책**: `enqueueTrack` / `nextTrack` / `trackEnded` 의 사유는 **선택**이다(비면 `reason: null` 로 기록). 반면 **`changeTrack` 은 사유 필수**(`validateReason`)이며, `currentTrack` 만 설정하고 **큐를 건드리지 않는다** — 큐 모델과 독립적이다.
 - **제목 자동 채움(YouTube oEmbed)**: `changeTrack` / `enqueueTrack` 에서 `title` 이 생략되면(빈/미지정) 서버는 먼저 `title: null` 로 즉시 적용·브로드캐스트(스내피한 ack/broadcast 유지)한 뒤, **비동기**로 YouTube oEmbed(`https://www.youtube.com/oembed?url=...&format=json`, 3s 타임아웃)에서 제목을 best-effort 로 조회한다. 성공 시 해당 곡(아직 `title` 이 비어있는 `currentTrack`/큐 항목)에 제목을 채우고 **재브로드캐스트**한다. 실패/타임아웃/오류 시 `null` 로 두며 절대 곡 변경을 막지 않는다(fire-and-forget). 이미 제공된 non-null `title` 은 덮어쓰지 않는다.
 - **임베드 가능 검사(YouTube oEmbed)**: `changeTrack` / `enqueueTrack` 에서 url 파싱 성공 후, 서버는 oEmbed(`https://www.youtube.com/oembed?url=...&format=json`, 3s 타임아웃)로 임베드 가능 여부를 **추가 시점에 한 번** 확인한다. oEmbed 401/404 → 임베드 비활성화/이용 불가로 보고 `{ ok:false, error:'embed disabled' }` 로 **거부**한다. oEmbed 200 → 통과. 그 외 상태/네트워크 오류/타임아웃 → **unknown(null)** 이며 **fail-open**(통과)하여 검사 실패가 곡 추가를 막지 않게 한다. `REMOTE_DJ_FAKE_TITLE` 가 설정된 테스트/QA 모드에서는 네트워크 없이 항상 통과한다.
-- **`trackEnded` 는 Player 전용**이다: controller가 발행하면 ack `{ ok:false, error:'player only' }`. **`nextTrack`/`removeQueued` 도 Player 전용(메인)**이다(controller가 발행 시 `player only`). **`enqueueTrack` 은 게스트-허용**이라 Player·Controller 둘 다 발행할 수 있다.
+- **`trackEnded` 는 Player 전용**이다: controller가 발행하면 ack `{ ok:false, error:'player only' }`. **`nextTrack` 도 Player 전용(메인)**이다(controller가 발행 시 `player only`). **`removeQueued` 는 멤버(Player·Controller 둘 다) 발행 가능하나 소유권으로 제한**된다 — Player는 모든 곡, Controller는 자신이 추가한 곡만(아니면 `not your item`). **`enqueueTrack` 은 게스트-허용**이라 Player·Controller 둘 다 발행할 수 있다.
 - **빈 플레이어 auto-start(QUEUE-14)**: `enqueueTrack` 시 방이 IDLE(`currentTrack === null`)이면 서버는 추가한 곡을 즉시 `currentTrack` 으로 승격하고 `isPlaying:true`, `playbackError:null`, `queue` 를 비운다. 이미 재생 중(`currentTrack !== null`)이면 큐 끝(FIFO)에만 추가한다.
 - 신규 방은 `queue: []` 로 시작한다.
 
@@ -370,7 +372,7 @@ Controller가 발행하면 `{ ok:false, error:'player only' }`.
 | `togglePlay` | 게스트-허용 | O | O |
 | `setTrackGain` | 게스트-허용 | O | O |
 | `nextTrack` | 메인-전용 | **O** | **X (player only)** |
-| `removeQueued` | 메인-전용 | **O** | **X (player only)** |
+| `removeQueued` | 멤버(소유권) | **O (모든 곡)** | **O (자신이 추가한 곡만, 아니면 not your item)** |
 | `setRepeat` | 메인-전용 | **O** | **X (player only)** |
 | `setShuffle` | 메인-전용 | **O** | **X (player only)** |
 | `seekTo` | 메인-전용 | **O** | **X (player only)** |

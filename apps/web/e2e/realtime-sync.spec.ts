@@ -103,6 +103,8 @@ async function openRoom(
   return page;
 }
 
+// 곡 변경 is now a MAIN-only control (it lives on the Player). Drive it on the
+// Player page — the guest (controller) no longer has this section.
 async function changeTrack(page: Page, url: string, reason: string): Promise<void> {
   // Scope to the 곡 변경 section — the 대기열 section has its own URL input.
   const section = page.locator('section', { hasText: '곡 변경' });
@@ -125,10 +127,11 @@ test('RT-01/TRK-06 multi-controller sync + player playback', async ({ browser })
   const a = await openRoom(ctxA, 'controller', room, 'A');
   const b = await openRoom(ctxB, 'controller', room, 'B');
 
-  // Controller A changes the track with a required reason.
-  await changeTrack(a, VALID_URL, '분위기 띄우려고');
+  // 곡 변경 is a MAIN-only control: the PLAYER changes the track with a reason.
+  await changeTrack(player, VALID_URL, '분위기 띄우려고');
 
-  // RT-01: Controller B's now-playing reflects the new track URL.
+  // RT-01: Controller A's AND B's now-playing reflect the new track URL.
+  await expect(a.getByRole('link', { name: VALID_URL })).toBeVisible({ timeout: 15_000 });
   await expect(b.getByRole('link', { name: VALID_URL })).toBeVisible({ timeout: 15_000 });
 
   // TRK-06: Player recorded loadVideoById with the parsed video id.
@@ -143,13 +146,21 @@ test('RT-01/TRK-06 multi-controller sync + player playback', async ({ browser })
   await Promise.all([playerCtx.close(), ctxA.close(), ctxB.close()]);
 });
 
-async function enqueueTrack(page: Page, url: string): Promise<void> {
+async function enqueueTrack(page: Page, url: string, title?: string): Promise<void> {
   const queueSection = page.locator('section', { hasText: '대기열' });
   await queueSection.getByPlaceholder('YouTube URL').fill(url);
+  if (title) await queueSection.getByPlaceholder('제목 (선택)').fill(title);
   await queueSection.getByRole('button', { name: '대기열 추가' }).click();
 }
 
+// Locate a queue row by its video id. The queue no longer renders the raw URL
+// (YouTube-style rows show thumbnail + title), so we key on data-testid + data-id.
+function queueRow(page: Page, id: string) {
+  return page.locator(`[data-testid="queue-item"][data-id="${id}"]`);
+}
+
 const SECOND_URL = 'https://youtu.be/9bZkp7q19f0';
+const SECOND_ID = '9bZkp7q19f0';
 
 // QUEUE-01 + QUEUE-07: with a track already playing, Controller A enqueues a
 // valid track → it appears in Controller B's queue UI; the PLAYER (main) clicks
@@ -169,17 +180,17 @@ test('QUEUE-01/07 enqueue propagates + 다음 곡 promotes to now-playing', asyn
   const a = await openRoom(ctxA, 'controller', room, 'A');
   const b = await openRoom(ctxB, 'controller', room, 'B');
 
-  // Establish a playing current track (A) first so the next enqueue queues
-  // instead of auto-starting.
-  await changeTrack(a, VALID_URL, '큐 테스트');
+  // Establish a playing current track first so the next enqueue queues instead
+  // of auto-starting (곡 변경 is main-only → drive it on the Player).
+  await changeTrack(player, VALID_URL, '큐 테스트');
   await expect(a.getByRole('link', { name: VALID_URL })).toBeVisible({ timeout: 15_000 });
 
   // QUEUE-01: A enqueues a second valid track (no reason required for enqueue).
-  await enqueueTrack(a, SECOND_URL);
+  await enqueueTrack(a, SECOND_URL, '두 번째 곡');
 
-  // The enqueued URL shows up in Controller B's queue list.
-  const bQueue = b.locator('section', { hasText: '대기열' });
-  await expect(bQueue.getByText(SECOND_URL)).toBeVisible({ timeout: 15_000 });
+  // The enqueued track shows up in Controller B's queue list (located by id —
+  // the YouTube-style row no longer renders the raw URL).
+  await expect(queueRow(b, SECOND_ID)).toBeVisible({ timeout: 15_000 });
 
   // QUEUE-07: the PLAYER clicks 다음 곡 (main-only) → queued head promotes.
   await player.getByRole('button', { name: '다음 곡' }).click();
@@ -261,7 +272,8 @@ test('SEEK-06/01 progress shows seek bar + player seek is logged', async ({ brow
   const a = await openRoom(ctxA, 'controller', room, 'A');
 
   // Load + start a track so the Player begins reporting progress (~2s interval).
-  await changeTrack(a, VALID_URL, '탐색 테스트');
+  // 곡 변경 is main-only → drive it on the Player.
+  await changeTrack(player, VALID_URL, '탐색 테스트');
 
   // Player recorded the load (track is now playing).
   await expect
@@ -336,8 +348,8 @@ test('ERR-01 player playback error surfaces on the controller', async ({ browser
   const player = await openRoom(playerCtx, 'player', room);
   const a = await openRoom(ctxA, 'controller', room, 'A');
 
-  // Load a track so there's a now-playing context.
-  await changeTrack(a, VALID_URL, '오류 테스트');
+  // Load a track so there's a now-playing context (곡 변경 is main-only → Player).
+  await changeTrack(player, VALID_URL, '오류 테스트');
   await expect(a.getByRole('link', { name: VALID_URL })).toBeVisible({ timeout: 15_000 });
 
   // Fire a YouTube error (100 = not found) from the mocked Player.
@@ -346,6 +358,68 @@ test('ERR-01 player playback error surfaces on the controller', async ({ browser
 
   // The Controller surfaces the error indicator.
   await expect(a.getByText(/재생 오류/)).toBeVisible({ timeout: 15_000 });
+
+  await Promise.all([playerCtx.close(), ctxA.close()]);
+});
+
+// QUEUE-REMOVE (guest ownership): a guest sees a remove ✕ ONLY on the item it
+// added and removing it succeeds; it sees NO ✕ on another guest's item.
+test('QUEUE-REMOVE guest can remove only its own queued item', async ({ browser }) => {
+  const room = uniqueRoom();
+
+  const playerCtx = await browser.newContext();
+  await mockYouTube(playerCtx);
+  const ctxA = await browser.newContext();
+  const ctxB = await browser.newContext();
+
+  const player = await openRoom(playerCtx, 'player', room);
+  const a = await openRoom(ctxA, 'controller', room, 'A');
+  const b = await openRoom(ctxB, 'controller', room, 'B');
+
+  // Start a current track (main-only 곡 변경) so enqueues queue, not auto-start.
+  await changeTrack(player, VALID_URL, '제거 테스트');
+  await expect(a.getByRole('link', { name: VALID_URL })).toBeVisible({ timeout: 15_000 });
+
+  // Guest A enqueues SECOND track → A owns it.
+  await enqueueTrack(a, SECOND_URL, 'A의 곡');
+  await expect(queueRow(a, SECOND_ID)).toBeVisible({ timeout: 15_000 });
+  await expect(queueRow(b, SECOND_ID)).toBeVisible({ timeout: 15_000 });
+
+  // A sees its own remove ✕; B sees the same row but NO remove ✕ (not its item).
+  await expect(queueRow(a, SECOND_ID).getByRole('button', { name: '제거' })).toBeVisible();
+  await expect(queueRow(b, SECOND_ID).getByRole('button', { name: '제거' })).toHaveCount(0);
+
+  // A removes its own item → it disappears for both A and B.
+  await queueRow(a, SECOND_ID).getByRole('button', { name: '제거' }).click();
+  await expect(queueRow(a, SECOND_ID)).toHaveCount(0, { timeout: 15_000 });
+  await expect(queueRow(b, SECOND_ID)).toHaveCount(0, { timeout: 15_000 });
+
+  await Promise.all([playerCtx.close(), ctxA.close(), ctxB.close()]);
+});
+
+// QUEUE-REMOVE (main): the Player (main) may remove ANY queued item, including
+// one a guest added.
+test('QUEUE-REMOVE main can remove any queued item', async ({ browser }) => {
+  const room = uniqueRoom();
+
+  const playerCtx = await browser.newContext();
+  await mockYouTube(playerCtx);
+  const ctxA = await browser.newContext();
+
+  const player = await openRoom(playerCtx, 'player', room);
+  const a = await openRoom(ctxA, 'controller', room, 'A');
+
+  await changeTrack(player, VALID_URL, '제거 테스트');
+  await expect(a.getByRole('link', { name: VALID_URL })).toBeVisible({ timeout: 15_000 });
+
+  // Guest A enqueues a track the Player (main) will remove.
+  await enqueueTrack(a, SECOND_URL, 'A의 곡');
+  await expect(queueRow(player, SECOND_ID)).toBeVisible({ timeout: 15_000 });
+
+  // Player sees a remove ✕ on the guest's item and removing it works.
+  await queueRow(player, SECOND_ID).getByRole('button', { name: '제거' }).click();
+  await expect(queueRow(player, SECOND_ID)).toHaveCount(0, { timeout: 15_000 });
+  await expect(queueRow(a, SECOND_ID)).toHaveCount(0, { timeout: 15_000 });
 
   await Promise.all([playerCtx.close(), ctxA.close()]);
 });

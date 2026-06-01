@@ -3,12 +3,14 @@
 import { ActivityFeed } from '@/components/ActivityFeed';
 import { ChangeTrackForm } from '@/components/ChangeTrackForm';
 import { EnqueueForm } from '@/components/EnqueueForm';
+import { QueueList } from '@/components/QueueList';
 import { ScheduleEditor } from '@/components/ScheduleEditor';
 import {
   actions,
   useActivityLog,
   useCurrentTrack,
   useIsPlaying,
+  useMySocketId,
   usePlaybackError,
   useProgress,
   useQueue,
@@ -19,6 +21,7 @@ import {
   useTrackGain,
   useVolume,
 } from '@/lib/roomStore';
+import type { Track } from '@remote-dj/shared';
 import { useEffect, useState } from 'react';
 
 /** Format a number of seconds as mm:ss. */
@@ -37,9 +40,16 @@ function formatTime(seconds: number): string {
  * everything the guest does PLUS the main-only controls the server restricts to
  * the player: 다음 곡 / 제거 / 반복·셔플 / 탐색 / 설정(익명 허용) / 예약.
  */
-export function ControlPanel({ variant }: { variant: 'guest' | 'main' }) {
+export function ControlPanel({
+  variant,
+  myNick,
+}: {
+  variant: 'guest' | 'main';
+  myNick?: string;
+}) {
   const isMain = variant === 'main';
 
+  const mySocketId = useMySocketId();
   const log = useActivityLog();
   const isPlaying = useIsPlaying();
   const track = useCurrentTrack();
@@ -96,24 +106,44 @@ export function ControlPanel({ variant }: { variant: 'guest' | 'main' }) {
 
   const repeatLabel = repeat === 'off' ? '반복 끔' : repeat === 'all' ? '반복 전체' : '반복 한곡';
 
+  // Main can remove anything; a guest can remove only items it added (matched by
+  // connection ownership, with a nickname fallback for reconnects).
+  const canRemove: (item: Track) => boolean = isMain
+    ? () => true
+    : (item) => item.ownerId === mySocketId || (!!myNick && item.addedBy === myNick);
+
   return (
     <>
       {/* now-playing card — primary info, visually elevated */}
       <section className="rounded-xl bg-neutral-900 p-4 ring-1 ring-emerald-500/30">
         <p className="text-xs uppercase tracking-wide text-emerald-400/80">현재 곡</p>
-        <p className="mt-1 text-xl font-bold leading-snug">
-          {track?.title ?? (track ? '(제목 없음)' : '재생 중인 곡 없음')}
-        </p>
-        {track?.url && (
-          <a
-            href={track.url}
-            target="_blank"
-            rel="noreferrer"
-            className="mt-1 block truncate text-xs text-emerald-400"
-          >
-            {track.url}
-          </a>
-        )}
+        <div className="mt-1 flex items-start gap-3">
+          {track && (
+            <div className="w-24 aspect-video shrink-0 overflow-hidden rounded-md bg-neutral-800">
+              <img
+                src={`https://i.ytimg.com/vi/${track.id}/mqdefault.jpg`}
+                loading="lazy"
+                className="h-full w-full object-cover"
+                alt=""
+              />
+            </div>
+          )}
+          <div className="min-w-0 flex-1">
+            <p className="text-xl font-bold leading-snug">
+              {track?.title ?? (track ? '(제목 없음)' : '재생 중인 곡 없음')}
+            </p>
+            {track?.url && (
+              <a
+                href={track.url}
+                target="_blank"
+                rel="noreferrer"
+                className="mt-1 block truncate text-xs text-emerald-400"
+              >
+                {track.url}
+              </a>
+            )}
+          </div>
+        </div>
         {playbackError && (
           <p className="mt-2 rounded-lg bg-red-950/60 px-3 py-2 text-xs font-semibold text-red-300">
             ⚠ Player 재생 오류 (코드 {playbackError.code})
@@ -121,11 +151,13 @@ export function ControlPanel({ variant }: { variant: 'guest' | 'main' }) {
         )}
       </section>
 
-      {/* change-track form */}
-      <section className="rounded-xl bg-neutral-900 p-4">
-        <h2 className="mb-3 text-sm font-semibold text-neutral-300">곡 변경</h2>
-        <ChangeTrackForm onSubmit={actions.changeTrack} />
-      </section>
+      {/* change-track form — MAIN only (guests use enqueue) */}
+      {isMain && (
+        <section className="rounded-xl bg-neutral-900 p-4">
+          <h2 className="mb-3 text-sm font-semibold text-neutral-300">곡 변경</h2>
+          <ChangeTrackForm onSubmit={actions.changeTrack} />
+        </section>
+      )}
 
       {/* queue (대기열) */}
       <section className="rounded-xl bg-neutral-900 p-4">
@@ -176,34 +208,13 @@ export function ControlPanel({ variant }: { variant: 'guest' | 'main' }) {
           </div>
         )}
 
-        {queue.length === 0 ? (
-          <p className="py-4 text-center text-sm text-neutral-400">대기열이 비어 있습니다.</p>
-        ) : (
-          <ul className="mb-3 flex flex-col gap-2">
-            {queue.map((item, index) => (
-              <li
-                key={`${item.id}-${index}`}
-                className="flex items-center justify-between gap-2 rounded-lg bg-neutral-800/60 px-3 py-2"
-              >
-                <div className="min-w-0">
-                  <p className="truncate text-sm font-medium text-neutral-200">
-                    {item.title ?? '(제목 없음)'}
-                  </p>
-                  <p className="truncate text-xs text-neutral-400">{item.url}</p>
-                </div>
-                {isMain && (
-                  <button
-                    type="button"
-                    onClick={() => void actions.removeQueued(index)}
-                    className="shrink-0 rounded-lg bg-neutral-700 px-3 py-1.5 text-xs font-semibold text-neutral-200"
-                  >
-                    제거
-                  </button>
-                )}
-              </li>
-            ))}
-          </ul>
-        )}
+        <div className="mb-3">
+          <QueueList
+            items={queue}
+            canRemove={canRemove}
+            onRemove={(i) => void actions.removeQueued(i)}
+          />
+        </div>
 
         <EnqueueForm onSubmit={actions.enqueueTrack} />
       </section>

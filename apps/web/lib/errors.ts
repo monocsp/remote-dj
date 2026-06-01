@@ -7,6 +7,7 @@ const ERROR_MESSAGES: Record<string, string> = {
   'wrong password': '비밀번호가 올바르지 않습니다',
   'nickname required': '닉네임이 있어야 곡을 변경할 수 있어요',
   'invalid index': '잘못된 항목이에요',
+  'not your item': '내가 추가한 곡만 삭제할 수 있어요',
   'invalid seconds': '잘못된 위치예요',
   'invalid code': '잘못된 방 코드예요',
   'player only': 'Player만 할 수 있는 동작이에요',

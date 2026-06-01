@@ -34,7 +34,9 @@ export interface Track {
   id: string; // YouTube video id
   url: string;
   title: string | null;
-  addedBy: string | null; // null = anonymous
+  addedBy: string | null; // null = anonymous (nickname, displayed)
+  addedAt: number; // epoch ms when the track was added
+  ownerId: string; // opaque id of the adder's connection (for ownership checks)
 }
 
 export interface RoomSettings {

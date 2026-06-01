@@ -23,6 +23,7 @@ interface RoomStoreState {
   connected: boolean;
   synced: boolean;
   lastError: string | null;
+  mySocketId: string | null;
 }
 
 const INITIAL: RoomStoreState = {
@@ -31,6 +32,7 @@ const INITIAL: RoomStoreState = {
   connected: false,
   synced: false,
   lastError: null,
+  mySocketId: null,
 };
 
 const store = createStore<RoomStoreState>(() => INITIAL);
@@ -69,7 +71,7 @@ export function connectRoom(
     socket = s;
 
     s.on('connect', () => {
-      store.setState({ connected: true });
+      store.setState({ connected: true, mySocketId: s.id });
       s.emitWithAck(C2S.Join, { roomCode, role, nickname, password }).then((ack: Ack) => {
         store.setState({ synced: ack.ok, lastError: ack.error ?? null });
       });
@@ -182,3 +184,4 @@ export const useLastSeek = () => useStore(store, (s) => s.state?.lastSeek ?? nul
 export const usePlaybackError = () => useStore(store, (s) => s.state?.playbackError ?? null);
 export const useActivityLog = () => useStore(store, (s) => s.log);
 export const useLastError = () => useStore(store, (s) => s.lastError);
+export const useMySocketId = () => useStore(store, (s) => s.mySocketId);

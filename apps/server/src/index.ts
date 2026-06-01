@@ -674,6 +674,8 @@ export function createServer(
         url,
         title: title ?? null,
         addedBy: data.nickname ?? null,
+        addedAt: Date.now(),
+        ownerId: socket.id,
       };
       // Preserve the track being replaced in server-only history so repeat-'all'
       // includes manually-changed tracks too.
@@ -772,6 +774,8 @@ export function createServer(
         url,
         title: title ?? null,
         addedBy: data.nickname ?? null,
+        addedAt: Date.now(),
+        ownerId: socket.id,
       };
       const record = await store.getOrCreate(room);
       await store.patchState(room, { queue: [...record.state.queue, track] });
@@ -804,7 +808,10 @@ export function createServer(
     });
 
     socket.on(C2S.RemoveQueued, async (payload: RemoveQueuedPayload, ack: AckFn) => {
-      const room = requirePlayer(ack);
+      // Member (Player OR Controller) may remove, then OWNERSHIP is enforced:
+      // the Player (main) may remove ANY item; a Controller may remove only the
+      // items it added (matched by ownerId or nickname).
+      const room = requireMember(ack);
       if (!room) return;
       const { index, reason } = payload ?? ({} as RemoveQueuedPayload);
       if (!withinLimit(reason, LIMITS.reason)) {
@@ -816,6 +823,16 @@ export function createServer(
       const queue = record.state.queue;
       if (!Number.isInteger(index) || index < 0 || index >= queue.length) {
         ack({ ok: false, error: 'invalid index' });
+        return;
+      }
+
+      const item = queue[index];
+      const allowed =
+        data.role === 'player' ||
+        item.ownerId === socket.id ||
+        (data.nickname != null && item.addedBy === data.nickname);
+      if (!allowed) {
+        ack({ ok: false, error: 'not your item' });
         return;
       }
 

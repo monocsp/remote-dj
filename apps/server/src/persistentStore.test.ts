@@ -29,7 +29,9 @@ describe('PersistentRoomStore', () => {
       type: 'play',
       reason: null,
     });
-    await a.setHistory('R1', [{ id: 'x', url: 'u', title: null, addedBy: null }]);
+    await a.setHistory('R1', [
+      { id: 'x', url: 'u', title: null, addedBy: null, addedAt: 0, ownerId: '' },
+    ]);
     a.flush();
 
     const b = new PersistentRoomStore(file);
@@ -37,7 +39,9 @@ describe('PersistentRoomStore', () => {
     expect(record).toBeDefined();
     expect(record?.state.volume).toBe(33);
     expect(record?.log).toEqual([{ id: 'a', ts: 1, actor: null, type: 'play', reason: null }]);
-    expect(record?.history).toEqual([{ id: 'x', url: 'u', title: null, addedBy: null }]);
+    expect(record?.history).toEqual([
+      { id: 'x', url: 'u', title: null, addedBy: null, addedAt: 0, ownerId: '' },
+    ]);
   });
 
   it('starts empty on a missing file without throwing', async () => {
