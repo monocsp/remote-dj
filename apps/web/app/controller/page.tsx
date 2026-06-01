@@ -14,7 +14,9 @@ import {
   usePlaybackError,
   useProgress,
   useQueue,
+  useRepeat,
   useSettings,
+  useShuffle,
   useTrackGain,
   useVolume,
 } from '@/lib/roomStore';
@@ -54,6 +56,8 @@ function ControllerInner() {
   const trackGain = useTrackGain();
   const progress = useProgress();
   const playbackError = usePlaybackError();
+  const stateRepeat = useRepeat();
+  const stateShuffle = useShuffle();
 
   // Local mirror of the volume slider; synced to authoritative state.
   const [vol, setVol] = useState(100);
@@ -83,8 +87,20 @@ function ControllerInner() {
   useEffect(() => {
     setAnon(settingsAnon);
   }, [settingsAnon]);
+  // Optimistic mirrors of repeat mode + shuffle so the buttons flip instantly.
+  const [repeat, setRepeat] = useState<'off' | 'one' | 'all'>('off');
+  useEffect(() => {
+    setRepeat(stateRepeat);
+  }, [stateRepeat]);
+  const [shuffle, setShuffle] = useState(false);
+  useEffect(() => {
+    setShuffle(stateShuffle);
+  }, [stateShuffle]);
+
   // Duration when the player has reported real progress, else null (no bar).
   const duration = progress != null && progress.duration > 0 ? progress.duration : null;
+
+  const repeatLabel = repeat === 'off' ? '반복 끔' : repeat === 'all' ? '반복 전체' : '반복 한곡';
 
   if (lastError === 'wrong password') {
     return (
@@ -146,6 +162,37 @@ function ControllerInner() {
             className="min-h-[44px] rounded-lg bg-emerald-500 px-3 text-xs font-bold text-neutral-950 transition disabled:opacity-40"
           >
             다음 곡
+          </button>
+        </div>
+
+        <div className="mb-3 flex gap-2">
+          <button
+            type="button"
+            onClick={() => {
+              const next = repeat === 'off' ? 'all' : repeat === 'all' ? 'one' : 'off';
+              setRepeat(next);
+              void actions.setRepeat(next);
+            }}
+            className={`min-h-[44px] flex-1 rounded-lg px-3 text-xs font-bold transition ${
+              repeat !== 'off'
+                ? 'bg-emerald-500 text-neutral-950'
+                : 'bg-neutral-800 text-neutral-300'
+            }`}
+          >
+            {repeatLabel}
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              const next = !shuffle;
+              setShuffle(next);
+              void actions.setShuffle(next);
+            }}
+            className={`min-h-[44px] flex-1 rounded-lg px-3 text-xs font-bold transition ${
+              shuffle ? 'bg-emerald-500 text-neutral-950' : 'bg-neutral-800 text-neutral-300'
+            }`}
+          >
+            {shuffle ? '셔플 켬' : '셔플 끔'}
           </button>
         </div>
 

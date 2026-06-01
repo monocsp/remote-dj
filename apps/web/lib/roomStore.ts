@@ -146,6 +146,14 @@ export const actions = {
     if (!socket) return Promise.resolve(DISCONNECTED_ACK);
     return socket.emitWithAck(C2S.SetTrackGain, { videoId, gain, reason });
   },
+  setRepeat(mode: RoomState['repeat'], reason?: string): Promise<Ack> {
+    if (!socket) return Promise.resolve(DISCONNECTED_ACK);
+    return socket.emitWithAck(C2S.SetRepeat, { mode, reason });
+  },
+  setShuffle(shuffle: boolean, reason?: string): Promise<Ack> {
+    if (!socket) return Promise.resolve(DISCONNECTED_ACK);
+    return socket.emitWithAck(C2S.SetShuffle, { shuffle, reason });
+  },
 } as const;
 
 // ── Fine-grained selector hooks ──────────────────────────────────────────────
@@ -155,6 +163,8 @@ export const useRoomState = () => useStore(store, (s) => s.state);
 export const useCurrentTrack = () => useStore(store, (s) => s.state?.currentTrack ?? null);
 export const useIsPlaying = () => useStore(store, (s) => s.state?.isPlaying ?? false);
 export const useVolume = () => useStore(store, (s) => s.state?.volume ?? 100);
+export const useRepeat = () => useStore(store, (s) => s.state?.repeat ?? 'off');
+export const useShuffle = () => useStore(store, (s) => s.state?.shuffle ?? false);
 export const useQueue = () => useStore(store, (s) => s.state?.queue ?? EMPTY_QUEUE);
 // Stable ref (EMPTY_GAIN) so the empty case doesn't churn useSyncExternalStore.
 export const useTrackGain = () => useStore(store, (s) => s.state?.trackGain ?? EMPTY_GAIN);
