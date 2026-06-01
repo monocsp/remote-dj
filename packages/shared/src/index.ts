@@ -5,6 +5,12 @@
 // ── Roles ────────────────────────────────────────────────────────────────
 export type Role = 'player' | 'controller';
 
+// ── Playback modes ─────────────────────────────────────────────────────────
+// off  — when the queue empties, stop (keep currentTrack).
+// one  — on AUTO track end, replay the current track (manual next ignores this).
+// all  — when the queue empties, loop back through everything already played.
+export type RepeatMode = 'off' | 'one' | 'all';
+
 // ── Domain types ───────────────────────────────────────────────────────────
 export interface Track {
   id: string; // YouTube video id
@@ -23,6 +29,8 @@ export interface RoomState {
   queue: Track[]; // upcoming tracks, played in order after currentTrack
   isPlaying: boolean;
   volume: number; // 0-100
+  repeat: RepeatMode; // 'off' (default) | 'one' | 'all'
+  shuffle: boolean; // when true, advance picks a random track instead of the head
   settings: RoomSettings;
   presence: { playerConnected: boolean; controllers: number };
   updatedAt: number; // epoch ms
@@ -49,7 +57,8 @@ export type ActivityType =
   | 'dequeue'
   | 'skip'
   | 'seek'
-  | 'gain';
+  | 'gain'
+  | 'mode';
 
 export interface ActivityEntry {
   id: string;
@@ -131,6 +140,18 @@ export interface SetTrackGainPayload {
   reason?: string;
 }
 
+// Controller sets the repeat mode.
+export interface SetRepeatPayload {
+  mode: RepeatMode;
+  reason?: string;
+}
+
+// Controller toggles shuffle.
+export interface SetShufflePayload {
+  shuffle: boolean;
+  reason?: string;
+}
+
 export interface Ack {
   ok: boolean;
   error?: string;
@@ -151,6 +172,8 @@ export const C2S = {
   Progress: 'progress',
   PlaybackError: 'playbackError',
   SetTrackGain: 'setTrackGain',
+  SetRepeat: 'setRepeat',
+  SetShuffle: 'setShuffle',
 } as const;
 
 export const S2C = {

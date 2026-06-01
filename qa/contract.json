@@ -12,7 +12,9 @@
     "SeekTo": "seekTo",
     "Progress": "progress",
     "PlaybackError": "playbackError",
-    "SetTrackGain": "setTrackGain"
+    "SetTrackGain": "setTrackGain",
+    "SetRepeat": "setRepeat",
+    "SetShuffle": "setShuffle"
   },
   "s2c": {
     "State": "state",

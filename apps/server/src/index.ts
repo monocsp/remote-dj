@@ -12,11 +12,14 @@ import {
   type PlaybackErrorPayload,
   type ProgressPayload,
   type RemoveQueuedPayload,
+  type RepeatMode,
   type Role,
   type RoomSettings,
   type RoomState,
   S2C,
   type SeekToPayload,
+  type SetRepeatPayload,
+  type SetShufflePayload,
   type SetTrackGainPayload,
   type SetVolumePayload,
   type TogglePlayPayload,
@@ -115,6 +118,25 @@ export async function defaultResolveLoudness(videoId: string): Promise<number | 
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * Pick the index of the next track from a list of length `len`:
+ * a random index when shuffle is on, otherwise the head (0). Math.random is
+ * allowed server-side. Callers ensure `len > 0`.
+ */
+function pickIndex(len: number, shuffle: boolean): number {
+  return shuffle ? Math.floor(Math.random() * len) : 0;
+}
+
+/** Return a shuffled copy of `a` (Fisher–Yates). Does not mutate the input. */
+function shuffledCopy<T>(a: T[]): T[] {
+  const out = [...a];
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [out[i], out[j]] = [out[j], out[i]];
+  }
+  return out;
 }
 
 /**
@@ -238,6 +260,67 @@ export function createServer(
     await store.patchState(roomCode, {
       trackGain: { ...rec.state.trackGain, [videoId]: factor },
     });
+    await broadcastState(roomCode);
+  }
+
+  /**
+   * Shared advance logic for BOTH manual next (controller) and auto end
+   * (player trackEnded). Always moves to a DIFFERENT next track — the
+   * repeat-'one' replay is handled by the trackEnded caller, never here.
+   *
+   * Source of the next track:
+   *  - queue non-empty: push the current track into server-only history, then
+   *    pick from the queue (head, or random when shuffle).
+   *  - queue empty + repeat 'all': rebuild the pool from everything played
+   *    (history + current), reset history, play the first (order shuffled when
+   *    shuffle is on).
+   *  - queue empty + 'off'/'one': stop (isPlaying:false), keep currentTrack.
+   *
+   * `log` records the resulting activity (skip) — auto end passes a null actor
+   * with detail {auto:true}; manual next passes the controller's reason.
+   */
+  async function advance(
+    roomCode: string,
+    log: (detail: Record<string, unknown>) => Promise<void>,
+  ): Promise<void> {
+    const record = await store.getOrCreate(roomCode);
+    const { currentTrack: cur, queue, repeat, shuffle } = record.state;
+
+    let next: Track;
+    let rest: Track[];
+
+    if (queue.length > 0) {
+      // Remember the track we are leaving so repeat-'all' can replay it later.
+      if (cur) await store.setHistory(roomCode, [...record.history, cur]);
+      const i = pickIndex(queue.length, shuffle);
+      next = queue[i];
+      rest = [...queue.slice(0, i), ...queue.slice(i + 1)];
+    } else if (repeat === 'all') {
+      const all = [...record.history, ...(cur ? [cur] : [])];
+      if (all.length === 0) {
+        // Nothing has ever played: nothing to loop, just stop.
+        await store.patchState(roomCode, { isPlaying: false });
+        await broadcastState(roomCode);
+        return;
+      }
+      const pool = shuffle ? shuffledCopy(all) : all;
+      await store.setHistory(roomCode, []);
+      next = pool[0];
+      rest = pool.slice(1);
+    } else {
+      // repeat 'off' or 'one' with an empty queue: stop, keep current.
+      await store.patchState(roomCode, { isPlaying: false });
+      await broadcastState(roomCode);
+      return;
+    }
+
+    await store.patchState(roomCode, {
+      currentTrack: next,
+      queue: rest,
+      isPlaying: true,
+      playbackError: null,
+    });
+    await log({ id: next.id });
     await broadcastState(roomCode);
   }
 
@@ -407,6 +490,11 @@ export function createServer(
         title: title ?? null,
         addedBy: data.nickname ?? null,
       };
+      // Preserve the track being replaced in server-only history so repeat-'all'
+      // includes manually-changed tracks too.
+      const before = await store.getOrCreate(room);
+      const oldCur = before.state.currentTrack;
+      if (oldCur) await store.setHistory(room, [...before.history, oldCur]);
       await store.patchState(room, { currentTrack: track, isPlaying: true, playbackError: null });
       await recordActivity('track_change', reason.trim(), { id, url, title: track.title });
       ack({ ok: true });
@@ -539,50 +627,35 @@ export function createServer(
       }
 
       const record = await store.getOrCreate(room);
-      const queue = record.state.queue;
-      if (queue.length === 0) {
-        // Nothing queued: no-op success, no broadcast needed.
+      // Manual next ALWAYS advances (ignores repeat 'one'). With an empty queue
+      // and no 'all' loop there is nothing to go to: ack ok, leave playback as
+      // is (don't stop on a manual next — matches the prior no-op behaviour).
+      if (record.state.queue.length === 0 && record.state.repeat !== 'all') {
         ack({ ok: true });
         return;
       }
 
-      const [head, ...rest] = queue;
-      await store.patchState(room, {
-        currentTrack: head,
-        queue: rest,
-        isPlaying: true,
-        playbackError: null,
-      });
-      await recordActivity('skip', reason?.trim() || null, { id: head.id });
+      await advance(room, (detail) => recordActivity('skip', reason?.trim() || null, detail));
       ack({ ok: true });
-      await broadcastState(room);
     });
 
     socket.on(C2S.TrackEnded, async (_payload, ack: AckFn) => {
       const room = requirePlayer(ack);
       if (!room) return;
 
-      // Behaves like an automatic next: advance the queue if anything is queued,
-      // otherwise just stop playing.
       const record = await store.getOrCreate(room);
-      const queue = record.state.queue;
-      if (queue.length === 0) {
-        await store.patchState(room, { isPlaying: false });
+      // repeat 'one': on AUTO end, replay the current track from the start.
+      // No activity (avoid log noise). Handled here, not in advance().
+      if (record.state.repeat === 'one' && record.state.currentTrack) {
+        await store.patchState(room, { lastSeek: { seconds: 0, ts: Date.now() }, isPlaying: true });
         ack({ ok: true });
         await broadcastState(room);
         return;
       }
 
-      const [head, ...rest] = queue;
-      await store.patchState(room, {
-        currentTrack: head,
-        queue: rest,
-        isPlaying: true,
-        playbackError: null,
-      });
-      await recordActivity('skip', null, { auto: true });
+      // Otherwise behave like an automatic next via the shared advance logic.
+      await advance(room, (detail) => recordActivity('skip', null, { auto: true, ...detail }));
       ack({ ok: true });
-      await broadcastState(room);
     });
 
     socket.on(C2S.SeekTo, async (payload: SeekToPayload, ack: AckFn) => {
@@ -661,6 +734,41 @@ export function createServer(
         trackGain: { ...record.state.trackGain, [videoId]: g },
       });
       await recordActivity('gain', reason?.trim() || null, { videoId, gain: g });
+      ack({ ok: true });
+      await broadcastState(room);
+    });
+
+    socket.on(C2S.SetRepeat, async (payload: SetRepeatPayload, ack: AckFn) => {
+      const room = requireController(ack);
+      if (!room) return;
+      const { mode, reason } = payload ?? ({} as SetRepeatPayload);
+      if (!withinLimit(reason, LIMITS.reason)) {
+        ack({ ok: false, error: 'input too long' });
+        return;
+      }
+      if (mode !== 'off' && mode !== 'one' && mode !== 'all') {
+        ack({ ok: false, error: 'invalid mode' });
+        return;
+      }
+
+      await store.patchState(room, { repeat: mode as RepeatMode });
+      await recordActivity('mode', reason?.trim() || null, { repeat: mode });
+      ack({ ok: true });
+      await broadcastState(room);
+    });
+
+    socket.on(C2S.SetShuffle, async (payload: SetShufflePayload, ack: AckFn) => {
+      const room = requireController(ack);
+      if (!room) return;
+      const { shuffle, reason } = payload ?? ({} as SetShufflePayload);
+      if (!withinLimit(reason, LIMITS.reason)) {
+        ack({ ok: false, error: 'input too long' });
+        return;
+      }
+      const on = Boolean(shuffle);
+
+      await store.patchState(room, { shuffle: on });
+      await recordActivity('mode', reason?.trim() || null, { shuffle: on });
       ack({ ok: true });
       await broadcastState(room);
     });

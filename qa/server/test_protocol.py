@@ -28,6 +28,8 @@ from contract import (
     PROGRESS,
     REMOVE_QUEUED,
     SEEK_TO,
+    SET_REPEAT,
+    SET_SHUFFLE,
     SET_TRACK_GAIN,
     SET_VOLUME,
     TOGGLE_PLAY,
@@ -704,3 +706,90 @@ def test_GAIN_03_auto_seed_from_loudness(make_client):
     st = c.wait_for_state(lambda s: 0 < s.get("trackGain", {}).get(VALID_ID, 1) < 1)
     assert st is not None
     assert 0 < st["trackGain"][VALID_ID] < 1
+
+
+SECOND_URL = "https://youtu.be/9bZkp7q19f0"
+SECOND_ID = "9bZkp7q19f0"
+
+
+# ── MODE-01: setRepeat broadcasts state.repeat + logs a mode activity ────────
+def test_MODE_01_set_repeat_broadcasts_and_logs(make_client):
+    controller = make_client()
+    observer = make_client()
+    room = room_code()
+    controller.join(room)
+    observer.join(room, role="player")
+    observer.states.clear()
+    observer.activities.clear()
+    ack = controller.call(SET_REPEAT, {"mode": "all"})
+    assert ack["ok"] is True
+    st = observer.wait_for_state(lambda s: s.get("repeat") == "all")
+    assert st is not None
+    assert st["repeat"] == "all"
+    modes = [a for a in observer.activities if a["type"] == "mode"]
+    assert modes and modes[-1].get("detail", {}).get("repeat") == "all"
+
+
+# ── MODE-02: setShuffle broadcasts state.shuffle ────────────────────────────
+def test_MODE_02_set_shuffle_broadcasts(make_client):
+    c = make_client()
+    room = room_code()
+    c.join(room)
+    c.states.clear()
+    ack = c.call(SET_SHUFFLE, {"shuffle": True})
+    assert ack["ok"] is True
+    st = c.wait_for_state(lambda s: s.get("shuffle") is True)
+    assert st is not None
+    assert st["shuffle"] is True
+
+
+# ── REPEAT-ALL: empty queue under repeat 'all' loops back from history ──────
+def test_REPEAT_ALL_loops_from_history(make_client):
+    controller = make_client()
+    player = make_client()
+    room = room_code()
+    controller.join(room)
+    player.join(room, role="player")
+    assert controller.call(SET_REPEAT, {"mode": "all"})["ok"] is True
+    assert controller.call(CHANGE_TRACK, {"url": VALID_URL, "reason": "A"})["ok"] is True
+    player.wait_for_state(lambda s: (s.get("currentTrack") or {}).get("id") == VALID_ID)
+    assert controller.call(ENQUEUE_TRACK, {"url": SECOND_URL})["ok"] is True
+
+    # First trackEnded promotes B; A moves into server-only history.
+    assert player.call(TRACK_ENDED, {})["ok"] is True
+    st = player.wait_for_state(
+        lambda s: (s.get("currentTrack") or {}).get("id") == SECOND_ID
+        and len(s.get("queue", [])) == 0
+    )
+    assert st is not None
+
+    # Second trackEnded: empty queue + repeat 'all' loops back to A.
+    assert player.call(TRACK_ENDED, {})["ok"] is True
+    st = player.wait_for_state(
+        lambda s: (s.get("currentTrack") or {}).get("id") == VALID_ID and s.get("isPlaying") is True
+    )
+    assert st is not None
+    assert st["currentTrack"]["id"] == VALID_ID
+    assert st["isPlaying"] is True
+
+
+# ── OFF-STOP: empty queue under repeat 'off' stops playback ─────────────────
+def test_OFF_STOP_stops_on_empty_queue(make_client):
+    controller = make_client()
+    player = make_client()
+    room = room_code()
+    controller.join(room)
+    player.join(room, role="player")
+    # repeat defaults to 'off'.
+    assert controller.call(CHANGE_TRACK, {"url": VALID_URL, "reason": "A"})["ok"] is True
+    player.wait_for_state(
+        lambda s: (s.get("currentTrack") or {}).get("id") == VALID_ID and s.get("isPlaying") is True
+    )
+    assert player.call(TRACK_ENDED, {})["ok"] is True
+    st = player.wait_for_state(
+        lambda s: s.get("isPlaying") is False
+        and (s.get("currentTrack") or {}).get("id") == VALID_ID
+    )
+    assert st is not None
+    assert st["isPlaying"] is False
+    assert st["currentTrack"]["id"] == VALID_ID

@@ -59,6 +59,8 @@ type Role = 'player' | 'controller';
 | `progress` | C→S | `{ currentTime: number; duration: number }` | **Player 전용**(controller가 발행 시 `{ ok:false, error:'player only' }`). `currentTime`/`duration` 이 유한수 `>= 0` 가 아니면 `{ ok:false, error:'invalid progress' }`. `progress` 갱신 + 브로드캐스트. **로그 기록 안 함**(고빈도) |
 | `playbackError` | C→S | `{ code: number }` | **Player 전용**(controller가 발행 시 `{ ok:false, error:'player only' }`). `code` 가 유한수가 아니면 `{ ok:false, error:'invalid code' }`. `playbackError = { code, ts }` 갱신 + 브로드캐스트. **로그 기록 안 함**(상태로만 노출). 새 곡 시도 시 초기화 |
 | `setTrackGain` | C→S | `{ videoId: string; gain: number; reason?: string }` | **Controller 전용**. `videoId` 가 비어있지 않은 문자열이 아니면 `{ ok:false, error:'invalid videoId' }`. `clampGain(gain)` 으로 `[0.2, 1.0]` 보정 후 `trackGain[videoId]` 에 설정, activity `gain`, detail `{videoId, gain}`, 브로드캐스트. **사유 선택** |
+| `setRepeat` | C→S | `{ mode: 'off'\|'one'\|'all'; reason?: string }` | **Controller 전용**. `mode` 가 `off`/`one`/`all` 이 아니면 `{ ok:false, error:'invalid mode' }`. `repeat` 갱신, activity `mode`, detail `{repeat}`, 브로드캐스트. **사유 선택** |
+| `setShuffle` | C→S | `{ shuffle: boolean; reason?: string }` | **Controller 전용**. `shuffle` 를 boolean 으로 강제. `shuffle` 갱신, activity `mode`, detail `{shuffle}`, 브로드캐스트. **사유 선택** |
 | `state` | S→C | `RoomState` | join 직후 + 모든 변경 후 브로드캐스트 |
 | `activity` | S→C | `ActivityEntry` | 신규 항목 1건 |
 | `activityLog` | S→C | `ActivityEntry[]` | join 직후 전체 로그 |
@@ -87,6 +89,8 @@ interface RoomState {
   queue: Track[];          // currentTrack 다음에 순서대로 재생될 대기열
   isPlaying: boolean;
   volume: number;          // 0-100
+  repeat: 'off' | 'one' | 'all'; // 반복 모드(기본 'off')
+  shuffle: boolean;        // 셔플(기본 false) — 다음 곡을 무작위로 선택
   settings: RoomSettings;
   presence: { playerConnected: boolean; controllers: number };
   updatedAt: number;       // epoch ms
@@ -103,7 +107,7 @@ interface RoomState {
 
 type ActivityType =
   | 'track_change' | 'volume' | 'play' | 'pause' | 'settings'
-  | 'enqueue' | 'dequeue' | 'skip' | 'seek' | 'gain';
+  | 'enqueue' | 'dequeue' | 'skip' | 'seek' | 'gain' | 'mode';
 
 interface ActivityEntry {
   id: string;
@@ -130,6 +134,37 @@ interface ActivityEntry {
 - **제목 자동 채움(YouTube oEmbed)**: `changeTrack` / `enqueueTrack` 에서 `title` 이 생략되면(빈/미지정) 서버는 먼저 `title: null` 로 즉시 적용·브로드캐스트(스내피한 ack/broadcast 유지)한 뒤, **비동기**로 YouTube oEmbed(`https://www.youtube.com/oembed?url=...&format=json`, 3s 타임아웃)에서 제목을 best-effort 로 조회한다. 성공 시 해당 곡(아직 `title` 이 비어있는 `currentTrack`/큐 항목)에 제목을 채우고 **재브로드캐스트**한다. 실패/타임아웃/오류 시 `null` 로 두며 절대 곡 변경을 막지 않는다(fire-and-forget). 이미 제공된 non-null `title` 은 덮어쓰지 않는다.
 - **`trackEnded` 는 Player 전용**이다: controller가 발행하면 ack `{ ok:false, error:'player only' }`. 그 외 큐 제어 이벤트는 모두 Controller 전용이다.
 - 신규 방은 `queue: []` 로 시작한다.
+
+## 반복/셔플/다음곡 결정 (repeat / shuffle / advance)
+
+방은 두 재생 모드를 가진다: `RoomState.repeat`(`'off'`(기본)/`'one'`/`'all'`)와
+`RoomState.shuffle`(기본 `false`). 둘 다 **Controller 전용** 이벤트로 변경한다.
+
+| 동작 | 발행자 | 사유 | 효과 |
+| --- | --- | --- | --- |
+| `setRepeat` | Controller | **선택** | `mode` 검증(아니면 `invalid mode`). `repeat` 갱신, activity `mode`, detail `{repeat}` |
+| `setShuffle` | Controller | **선택** | `shuffle` 를 boolean 으로 강제. `shuffle` 갱신, activity `mode`, detail `{shuffle}` |
+
+**큐 모델(불변)**: `enqueueTrack` 은 항상 **큐 끝(FIFO)** 에 추가한다 — shuffle 여부와 무관.
+
+**다음곡 결정(advance)** — `nextTrack`(수동)과 `trackEnded`(자동)가 공유하는 단일 로직:
+- **큐가 있으면**: 떠나는 `currentTrack` 을 **서버 전용 history** 에 넣고, 큐에서 다음 곡을
+  고른다 — `shuffle` 이면 무작위 인덱스, 아니면 맨 앞(head). 큐에서 그 곡을 제거.
+- **큐가 비었으면**:
+  - `repeat === 'all'`: 지금까지 재생한 전체(`history + 현재곡`)로 풀을 재구성해 처음부터 다시
+    재생한다(`shuffle` 이면 순서를 섞음). history 는 비운다. 재생한 적이 없으면 그냥 정지.
+  - `repeat === 'off' | 'one'`: 정지(`isPlaying:false`), `currentTrack` 유지.
+
+**반복 'one'(현재곡 반복)**: **자동 종료(`trackEnded`)** 에서만 동작한다 — `currentTrack` 이
+있으면 `lastSeek = { seconds: 0, ts }` + `isPlaying:true` 로 **현재곡을 처음부터 다시 재생**하고
+**activity 를 남기지 않는다**(로그 오염 방지). advance() 로 가지 않는다.
+
+**수동 next 는 반복 'one' 을 무시**한다(항상 *다른* 다음 곡으로). 큐가 비고 `repeat !== 'all'`
+이면 갈 곳이 없으므로 `{ok:true}` no-op 으로 끝낸다(재생을 멈추지 않음 — 기존 동작 유지).
+
+**history 는 서버 전용**(`RoomRecord.history: Track[]`, 최근 100개 cap)이며 **`RoomState`/
+브로드캐스트에 절대 포함하지 않는다**. `changeTrack` 도 이전 `currentTrack` 을 history 에 넣어
+repeat-'all' 풀에 수동 변경 곡까지 포함되게 한다. 새 곡 승격 시 `playbackError: null` 로 비운다.
 
 ## 탐색(Seek) / 진행상황(Progress)
 
@@ -278,6 +313,8 @@ activity `gain`(detail `{videoId, gain}`)을 남긴 뒤 브로드캐스트한다
 | `progress` | **O** | X |
 | `playbackError` | **O** | X |
 | `setTrackGain` | X | O |
+| `setRepeat` | X | O |
+| `setShuffle` | X | O |
 
 ## 비범위 (추후)
 

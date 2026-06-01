@@ -892,6 +892,158 @@ describe('remote-dj server', () => {
     }
   });
 
+  // ── MODE / REPEAT / SHUFFLE: playback modes ─────────────────────────────────
+
+  const SECOND_URL = 'https://youtu.be/9bZkp7q19f0';
+  const SECOND_ID = '9bZkp7q19f0';
+  const THIRD_URL = 'https://youtu.be/kJQP7kiw5Fk';
+
+  it('MODE-01 setRepeat broadcasts state.repeat and logs a mode activity', async () => {
+    const room = 'MODE01';
+    const controller = connect();
+    const player = connect();
+    await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+    await player.emitWithAck(C2S.Join, { roomCode: room, role: 'player' });
+
+    const repeatAll = (s: RoomState) => s.repeat === 'all';
+    const isMode = (a: ActivityEntry) => a.type === 'mode';
+    const playerState = waitFor<RoomState>(player, S2C.State, repeatAll);
+    const playerActivity = waitFor<ActivityEntry>(player, S2C.Activity, isMode);
+
+    const ack = (await controller.emitWithAck(C2S.SetRepeat, { mode: 'all' })) as Ack;
+    expect(ack.ok).toBe(true);
+
+    const [ps, pa] = await Promise.all([playerState, playerActivity]);
+    expect(ps.repeat).toBe('all');
+    expect(pa.type).toBe('mode');
+    expect((pa.detail as { repeat: string }).repeat).toBe('all');
+  });
+
+  it('MODE-02 setShuffle broadcasts state.shuffle', async () => {
+    const room = 'MODE02';
+    const controller = connect();
+    await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+
+    const shuffleOn = waitFor<RoomState>(controller, S2C.State, (s) => s.shuffle === true);
+    const ack = (await controller.emitWithAck(C2S.SetShuffle, { shuffle: true })) as Ack;
+    expect(ack.ok).toBe(true);
+
+    const s = await shuffleOn;
+    expect(s.shuffle).toBe(true);
+  });
+
+  it('REPEAT-ONE replays the current track on trackEnded (lastSeek 0, same track)', async () => {
+    const room = 'REPONE';
+    const controller = connect();
+    const player = connect();
+    await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+    await player.emitWithAck(C2S.Join, { roomCode: room, role: 'player' });
+
+    await controller.emitWithAck(C2S.SetRepeat, { mode: 'one' });
+    const hasA = waitFor<RoomState>(player, S2C.State, (s) => s.currentTrack?.id === 'dQw4w9WgXcQ');
+    await controller.emitWithAck(C2S.ChangeTrack, { url: VALID_URL, reason: 'A' });
+    await hasA;
+
+    const replayed = waitFor<RoomState>(
+      player,
+      S2C.State,
+      (s) => s.lastSeek?.seconds === 0 && s.currentTrack?.id === 'dQw4w9WgXcQ' && s.isPlaying,
+    );
+    const ack = (await player.emitWithAck(C2S.TrackEnded, {})) as Ack;
+    expect(ack.ok).toBe(true);
+
+    const s = await replayed;
+    expect(s.lastSeek?.seconds).toBe(0);
+    expect(s.currentTrack?.id).toBe('dQw4w9WgXcQ');
+    expect(s.isPlaying).toBe(true);
+  });
+
+  it('REPEAT-ALL loops back to an earlier track from history when the queue empties', async () => {
+    const room = 'REPALL';
+    const controller = connect();
+    const player = connect();
+    await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+    await player.emitWithAck(C2S.Join, { roomCode: room, role: 'player' });
+
+    await controller.emitWithAck(C2S.SetRepeat, { mode: 'all' });
+    const hasA = waitFor<RoomState>(player, S2C.State, (s) => s.currentTrack?.id === 'dQw4w9WgXcQ');
+    await controller.emitWithAck(C2S.ChangeTrack, { url: VALID_URL, reason: 'A' });
+    await hasA;
+    await controller.emitWithAck(C2S.EnqueueTrack, { url: SECOND_URL });
+
+    // First trackEnded promotes B (queue head); A moves into history.
+    const onB = waitFor<RoomState>(
+      player,
+      S2C.State,
+      (s) => s.currentTrack?.id === SECOND_ID && s.queue.length === 0,
+    );
+    expect(((await player.emitWithAck(C2S.TrackEnded, {})) as Ack).ok).toBe(true);
+    const sB = await onB;
+    expect(sB.currentTrack?.id).toBe(SECOND_ID);
+
+    // Second trackEnded: queue empty + repeat 'all' loops back to A from history.
+    const loopedA = waitFor<RoomState>(
+      player,
+      S2C.State,
+      (s) => s.currentTrack?.id === 'dQw4w9WgXcQ' && s.isPlaying,
+    );
+    expect(((await player.emitWithAck(C2S.TrackEnded, {})) as Ack).ok).toBe(true);
+    const sA = await loopedA;
+    expect(sA.currentTrack?.id).toBe('dQw4w9WgXcQ');
+    expect(sA.isPlaying).toBe(true);
+  });
+
+  it('OFF-STOP stops playback when the queue empties under repeat off', async () => {
+    const room = 'OFFSTP';
+    const controller = connect();
+    const player = connect();
+    await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+    await player.emitWithAck(C2S.Join, { roomCode: room, role: 'player' });
+
+    // repeat defaults to 'off'.
+    const playing = waitFor<RoomState>(
+      player,
+      S2C.State,
+      (s) => s.currentTrack?.id === 'dQw4w9WgXcQ' && s.isPlaying,
+    );
+    await controller.emitWithAck(C2S.ChangeTrack, { url: VALID_URL, reason: 'A' });
+    await playing;
+
+    const stopped = waitFor<RoomState>(
+      player,
+      S2C.State,
+      (s) => s.isPlaying === false && s.currentTrack?.id === 'dQw4w9WgXcQ',
+    );
+    const ack = (await player.emitWithAck(C2S.TrackEnded, {})) as Ack;
+    expect(ack.ok).toBe(true);
+
+    const s = await stopped;
+    expect(s.isPlaying).toBe(false);
+    expect(s.currentTrack?.id).toBe('dQw4w9WgXcQ');
+  });
+
+  it('SHUFFLE picks a random queued track on manual nextTrack', async () => {
+    const room = 'SHUF01';
+    const controller = connect();
+    await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+
+    await controller.emitWithAck(C2S.SetShuffle, { shuffle: true });
+    await controller.emitWithAck(C2S.EnqueueTrack, { url: SECOND_URL });
+    await controller.emitWithAck(C2S.EnqueueTrack, { url: THIRD_URL });
+
+    const advanced = waitFor<RoomState>(
+      controller,
+      S2C.State,
+      (s) => s.currentTrack?.id === SECOND_ID || s.currentTrack?.id === 'kJQP7kiw5Fk',
+    );
+    const ack = (await controller.emitWithAck(C2S.NextTrack, {})) as Ack;
+    expect(ack.ok).toBe(true);
+
+    const s = await advanced;
+    expect(['9bZkp7q19f0', 'kJQP7kiw5Fk']).toContain(s.currentTrack?.id);
+    expect(s.queue.length).toBe(1);
+  });
+
   it('GAIN-04 auto-seed never overwrites a manually set gain', async () => {
     // Loudness stub reports +6 dB (would auto-seed ≈0.5), but a manual 0.8 wins.
     const local = createServer(

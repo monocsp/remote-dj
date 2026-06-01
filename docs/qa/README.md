@@ -36,6 +36,7 @@
 | [pairing.md](./pairing.md) | 입장 / 방 코드 / 선택적 비밀번호 / 닉네임 | `PAIR-` |
 | [track-change.md](./track-change.md) | 곡 변경(사유 필수, URL 검증, 브로드캐스트/로그) | `TRK-` |
 | [queue.md](./queue.md) | 재생 큐(추가/제거/다음/자동 진행, 권한) | `QUEUE-` |
+| [playback-modes.md](./playback-modes.md) | 반복/셔플/빈 큐 정책(setRepeat/setShuffle, advance, repeat-one 자동전용, all 루프, off 정지) | `MODE-`, `REPEAT-`, `SHUFFLE-`, `OFF-` |
 | [seek.md](./seek.md) | 탐색(seekTo)/진행상황(progress, 비로그, 권한) | `SEEK-` |
 | [playback-error.md](./playback-error.md) | YouTube 재생 오류/복구(playbackError, 비로그, 새 곡 시 초기화, 권한) | `ERR-` |
 | [loudness.md](./loudness.md) | 음량 정규화(곡별 게인 setTrackGain, loudnessDb 자동 시드, 수동 우선, 권한) | `GAIN-` |

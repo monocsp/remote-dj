@@ -13,6 +13,7 @@ const TYPE_LABEL: Record<ActivityType, string> = {
   skip: '다음 곡',
   seek: '탐색',
   gain: '음량 보정',
+  mode: '재생 모드',
 };
 
 function relativeTime(ts: number): string {
