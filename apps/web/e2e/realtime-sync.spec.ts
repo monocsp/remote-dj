@@ -149,9 +149,13 @@ async function enqueueTrack(page: Page, url: string): Promise<void> {
   await queueSection.getByRole('button', { name: '대기열 추가' }).click();
 }
 
-// QUEUE-01 + QUEUE-07: Controller A enqueues a valid track → it appears in
-// Controller B's queue UI; A clicks 다음 곡 → the formerly-queued track becomes
-// the now-playing track on both controllers.
+const SECOND_URL = 'https://youtu.be/9bZkp7q19f0';
+
+// QUEUE-01 + QUEUE-07: with a track already playing, Controller A enqueues a
+// valid track → it appears in Controller B's queue UI; A clicks 다음 곡 → the
+// formerly-queued track becomes the now-playing track on both controllers.
+// NOTE: enqueuing into an IDLE room auto-starts the track (QUEUE-14), so to test
+// QUEUEING we first change the current track, then enqueue B.
 test('QUEUE-01/07 enqueue propagates + 다음 곡 promotes to now-playing', async ({ browser }) => {
   const room = uniqueRoom();
 
@@ -161,19 +165,24 @@ test('QUEUE-01/07 enqueue propagates + 다음 곡 promotes to now-playing', asyn
   const a = await openRoom(ctxA, 'controller', room, 'A');
   const b = await openRoom(ctxB, 'controller', room, 'B');
 
-  // QUEUE-01: A enqueues a valid track (no reason required for enqueue).
-  await enqueueTrack(a, VALID_URL);
+  // Establish a playing current track (A) first so the next enqueue queues
+  // instead of auto-starting.
+  await changeTrack(a, VALID_URL, '큐 테스트');
+  await expect(a.getByRole('link', { name: VALID_URL })).toBeVisible({ timeout: 15_000 });
+
+  // QUEUE-01: A enqueues a second valid track (no reason required for enqueue).
+  await enqueueTrack(a, SECOND_URL);
 
   // The enqueued URL shows up in Controller B's queue list.
   const bQueue = b.locator('section', { hasText: '대기열' });
-  await expect(bQueue.getByText(VALID_URL)).toBeVisible({ timeout: 15_000 });
+  await expect(bQueue.getByText(SECOND_URL)).toBeVisible({ timeout: 15_000 });
 
-  // QUEUE-07: A clicks 다음 곡 → head promotes to currentTrack.
+  // QUEUE-07: A clicks 다음 곡 → queued head promotes to currentTrack.
   await a.getByRole('button', { name: '다음 곡' }).click();
 
   // Both controllers' now-playing card reflects the formerly-queued track.
-  await expect(a.getByRole('link', { name: VALID_URL })).toBeVisible({ timeout: 15_000 });
-  await expect(b.getByRole('link', { name: VALID_URL })).toBeVisible({ timeout: 15_000 });
+  await expect(a.getByRole('link', { name: SECOND_URL })).toBeVisible({ timeout: 15_000 });
+  await expect(b.getByRole('link', { name: SECOND_URL })).toBeVisible({ timeout: 15_000 });
 
   await Promise.all([ctxA.close(), ctxB.close()]);
 });

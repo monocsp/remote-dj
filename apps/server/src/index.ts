@@ -710,6 +710,24 @@ export function createServer(
       const record = await store.getOrCreate(room);
       await store.patchState(room, { queue: [...record.state.queue, track] });
       await recordActivity('enqueue', reason?.trim() || null, { id, url, title: track.title });
+
+      // If nothing is currently playing (idle player), auto-start the queue head
+      // right away — adding a song to an empty player begins playback, like most
+      // music apps. (When a track is already playing, enqueue just queues.)
+      if (!record.state.currentTrack) {
+        const after = await store.get(room);
+        const q = after?.state.queue ?? [];
+        if (q.length > 0) {
+          const [head, ...rest] = q;
+          await store.patchState(room, {
+            currentTrack: head,
+            queue: rest,
+            isPlaying: true,
+            playbackError: null,
+          });
+        }
+      }
+
       ack({ ok: true });
       await broadcastState(room);
       // No title provided: fill it from YouTube oEmbed asynchronously and

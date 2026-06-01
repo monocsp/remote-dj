@@ -319,20 +319,49 @@ def test_RT_07_nickname_length_cap(make_client):
     assert ack["ok"] is False
 
 
-# ── QUEUE-01/02: enqueue appends to state.queue, logs enqueue, reason null ──
-def test_QUEUE_01_02_enqueue_appends(make_client):
+SECOND_URL = "https://youtu.be/9bZkp7q19f0"
+SECOND_ID = "9bZkp7q19f0"
+
+
+# ── QUEUE-14: enqueue into an IDLE room auto-starts that track ───────────────
+def test_QUEUE_14_enqueue_into_idle_auto_starts(make_client):
     c = make_client()
     room = room_code()
     c.join(room)
     c.states.clear()
     c.activities.clear()
+    # Fresh idle room (currentTrack null): the first enqueue auto-starts it.
     ack = c.call(ENQUEUE_TRACK, {"url": VALID_URL})  # no reason
     assert ack["ok"] is True
-    c.wait_event(3.0)
-    st = c.last_state()
+    st = c.wait_for_state(
+        lambda s: (s.get("currentTrack") or {}).get("id") == VALID_ID
+        and s.get("isPlaying") is True
+        and len(s.get("queue", [])) == 0
+    )
     assert st is not None
-    assert any(t["id"] == VALID_ID for t in st["queue"])
-    assert st["currentTrack"] is None  # currentTrack unchanged
+    assert st["currentTrack"]["id"] == VALID_ID
+    assert st["isPlaying"] is True
+    assert len(st["queue"]) == 0
+    assert any(a["type"] == "enqueue" for a in c.activities)
+
+
+# ── QUEUE-01/02: enqueue while playing appends to queue, logs enqueue, reason null ──
+def test_QUEUE_01_02_enqueue_appends(make_client):
+    c = make_client()
+    room = room_code()
+    c.join(room)
+    # Establish a playing current track (A) first so the next enqueue (B) queues
+    # instead of auto-starting (QUEUE-14).
+    assert c.call(CHANGE_TRACK, {"url": VALID_URL, "reason": "A"})["ok"] is True
+    c.wait_for_state(lambda s: (s.get("currentTrack") or {}).get("id") == VALID_ID)
+    c.states.clear()
+    c.activities.clear()
+    ack = c.call(ENQUEUE_TRACK, {"url": SECOND_URL})  # no reason
+    assert ack["ok"] is True
+    st = c.wait_for_state(lambda s: any(t["id"] == SECOND_ID for t in s.get("queue", [])))
+    assert st is not None
+    assert any(t["id"] == SECOND_ID for t in st["queue"])
+    assert st["currentTrack"]["id"] == VALID_ID  # currentTrack unchanged (A)
     enq = [a for a in c.activities if a["type"] == "enqueue"]
     assert enq and enq[-1]["reason"] is None  # QUEUE-02: optional reason
 
@@ -352,14 +381,18 @@ def test_QUEUE_07_next_track_advances(make_client):
     c = make_client()
     room = room_code()
     c.join(room)
+    # A becomes current (auto-start); B then queues behind it.
     assert c.call(ENQUEUE_TRACK, {"url": VALID_URL})["ok"] is True
+    c.wait_for_state(lambda s: (s.get("currentTrack") or {}).get("id") == VALID_ID)
+    assert c.call(ENQUEUE_TRACK, {"url": SECOND_URL})["ok"] is True
+    c.wait_for_state(lambda s: any(t["id"] == SECOND_ID for t in s.get("queue", [])))
     c.states.clear()
     c.activities.clear()
     ack = c.call(NEXT_TRACK, {})
     assert ack["ok"] is True
-    c.wait_event(3.0)
-    st = c.last_state()
-    assert st["currentTrack"]["id"] == VALID_ID
+    st = c.wait_for_state(lambda s: (s.get("currentTrack") or {}).get("id") == SECOND_ID)
+    assert st is not None
+    assert st["currentTrack"]["id"] == SECOND_ID
     assert len(st["queue"]) == 0
     assert st["isPlaying"] is True
     assert any(a["type"] == "skip" for a in c.activities)
@@ -384,14 +417,18 @@ def test_QUEUE_09_track_ended_advances(make_client):
     room = room_code()
     controller.join(room)
     player.join(room, role="player")
+    # A becomes current (auto-start); B then queues behind it.
     assert controller.call(ENQUEUE_TRACK, {"url": VALID_URL})["ok"] is True
+    player.wait_for_state(lambda s: (s.get("currentTrack") or {}).get("id") == VALID_ID)
+    assert controller.call(ENQUEUE_TRACK, {"url": SECOND_URL})["ok"] is True
+    player.wait_for_state(lambda s: any(t["id"] == SECOND_ID for t in s.get("queue", [])))
     player.states.clear()
     player.activities.clear()
     ack = player.call(TRACK_ENDED, {})
     assert ack["ok"] is True
-    player.wait_event(3.0)
-    st = player.last_state()
-    assert st["currentTrack"]["id"] == VALID_ID
+    st = player.wait_for_state(lambda s: (s.get("currentTrack") or {}).get("id") == SECOND_ID)
+    assert st is not None
+    assert st["currentTrack"]["id"] == SECOND_ID
     assert len(st["queue"]) == 0
     skips = [a for a in player.activities if a["type"] == "skip"]
     assert skips and skips[-1].get("detail", {}).get("auto") is True
@@ -625,20 +662,26 @@ def test_RT_06_reconnect_resync(make_client):
 
 # ── QUEUE-13: removeQueued at index 0 drops head, keeps the rest ────────────
 def test_QUEUE_13_remove_queued_happy_path(make_client):
-    second_url = "https://youtu.be/9bZkp7q19f0"
-    second_id = "9bZkp7q19f0"
+    third_url = "https://youtu.be/3JZ_D3ELwOQ"
+    third_id = "3JZ_D3ELwOQ"
     c = make_client()
     room = room_code()
     c.join(room)
-    assert c.call(ENQUEUE_TRACK, {"url": VALID_URL})["ok"] is True
-    assert c.call(ENQUEUE_TRACK, {"url": second_url})["ok"] is True
+    # A becomes current (auto-start via changeTrack); B and C then queue → [B, C].
+    assert c.call(CHANGE_TRACK, {"url": VALID_URL, "reason": "A"})["ok"] is True
+    c.wait_for_state(lambda s: (s.get("currentTrack") or {}).get("id") == VALID_ID)
+    assert c.call(ENQUEUE_TRACK, {"url": SECOND_URL})["ok"] is True
+    assert c.call(ENQUEUE_TRACK, {"url": third_url})["ok"] is True
+    c.wait_for_state(
+        lambda s: len(s.get("queue", [])) == 2 and s["queue"][1]["id"] == third_id
+    )
     c.states.clear()
     ack = c.call(REMOVE_QUEUED, {"index": 0})
     assert ack["ok"] is True
     st = c.wait_for_state(lambda s: len(s.get("queue", [])) == 1)
     assert st is not None
     assert len(st["queue"]) == 1
-    assert st["queue"][0]["id"] == second_id
+    assert st["queue"][0]["id"] == third_id
 
 
 # ── SEEK-09: invalid progress payloads are rejected ─────────────────────────
@@ -711,10 +754,6 @@ def test_GAIN_03_auto_seed_from_loudness(make_client):
     st = c.wait_for_state(lambda s: 0 < s.get("trackGain", {}).get(VALID_ID, 1) < 1)
     assert st is not None
     assert 0 < st["trackGain"][VALID_ID] < 1
-
-
-SECOND_URL = "https://youtu.be/9bZkp7q19f0"
-SECOND_ID = "9bZkp7q19f0"
 
 
 # ── MODE-01: setRepeat broadcasts state.repeat + logs a mode activity ────────

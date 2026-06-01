@@ -291,16 +291,18 @@ describe('remote-dj server', () => {
     expect(state.stateVersion).toBeGreaterThan(before.stateVersion);
   });
 
-  it('enqueue adds the track to broadcast state.queue and logs enqueue', async () => {
-    const room = 'QUEUE1';
+  it('QUEUE-14 enqueue into an IDLE room auto-starts that track', async () => {
+    const room = 'QUEUE14';
     const controller = connect();
     const player = connect();
     await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
     await player.emitWithAck(C2S.Join, { roomCode: room, role: 'player' });
 
-    const hasQueued = (s: RoomState) => s.queue.some((t) => t.id === 'dQw4w9WgXcQ');
+    // Fresh idle room (currentTrack null): the first enqueue auto-starts it.
+    const started = (s: RoomState) =>
+      s.currentTrack?.id === 'dQw4w9WgXcQ' && s.isPlaying && s.queue.length === 0;
     const isEnqueue = (a: ActivityEntry) => a.type === 'enqueue';
-    const playerState = waitFor<RoomState>(player, S2C.State, hasQueued);
+    const playerState = waitFor<RoomState>(player, S2C.State, started);
     const playerActivity = waitFor<ActivityEntry>(player, S2C.Activity, isEnqueue);
 
     const ack = (await controller.emitWithAck(C2S.EnqueueTrack, {
@@ -310,28 +312,74 @@ describe('remote-dj server', () => {
     expect(ack.ok).toBe(true);
 
     const [ps, pa] = await Promise.all([playerState, playerActivity]);
-    expect(ps.queue[0]?.id).toBe('dQw4w9WgXcQ');
-    expect(ps.currentTrack).toBeNull();
+    expect(ps.currentTrack?.id).toBe('dQw4w9WgXcQ');
+    expect(ps.isPlaying).toBe(true);
+    expect(ps.queue.length).toBe(0);
+    expect(pa.type).toBe('enqueue');
+  });
+
+  it('enqueue while a track is playing appends to broadcast state.queue and logs enqueue', async () => {
+    const room = 'QUEUE1';
+    const SECOND_URL = 'https://youtu.be/9bZkp7q19f0';
+    const controller = connect();
+    const player = connect();
+    await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+    await player.emitWithAck(C2S.Join, { roomCode: room, role: 'player' });
+
+    // Establish a playing current track first (A) so the next enqueue (B) queues
+    // instead of auto-starting.
+    const hasA = waitFor<RoomState>(player, S2C.State, (s) => s.currentTrack?.id === 'dQw4w9WgXcQ');
+    await controller.emitWithAck(C2S.ChangeTrack, { url: VALID_URL, reason: 'A' });
+    await hasA;
+
+    const hasQueued = (s: RoomState) => s.queue.some((t) => t.id === '9bZkp7q19f0');
+    const isEnqueue = (a: ActivityEntry) => a.type === 'enqueue';
+    const playerState = waitFor<RoomState>(player, S2C.State, hasQueued);
+    const playerActivity = waitFor<ActivityEntry>(player, S2C.Activity, isEnqueue);
+
+    const ack = (await controller.emitWithAck(C2S.EnqueueTrack, {
+      url: SECOND_URL,
+      title: 'Gangnam Style',
+    })) as Ack;
+    expect(ack.ok).toBe(true);
+
+    const [ps, pa] = await Promise.all([playerState, playerActivity]);
+    expect(ps.queue[0]?.id).toBe('9bZkp7q19f0');
+    expect(ps.currentTrack?.id).toBe('dQw4w9WgXcQ');
     expect(pa.type).toBe('enqueue');
   });
 
   it('nextTrack advances currentTrack to the queued item and shrinks the queue', async () => {
     const room = 'QUEUE2';
+    const SECOND_URL = 'https://youtu.be/9bZkp7q19f0';
     const controller = connect();
     await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
 
+    // A becomes current (auto-start); B then queues behind it. Register each
+    // predicate wait BEFORE its triggering emit so a fast broadcast isn't missed.
+    const onA = waitFor<RoomState>(
+      controller,
+      S2C.State,
+      (s) => s.currentTrack?.id === 'dQw4w9WgXcQ',
+    );
     await controller.emitWithAck(C2S.EnqueueTrack, { url: VALID_URL });
+    await onA;
+    const queued = waitFor<RoomState>(controller, S2C.State, (s) =>
+      s.queue.some((t) => t.id === '9bZkp7q19f0'),
+    );
+    await controller.emitWithAck(C2S.EnqueueTrack, { url: SECOND_URL });
+    await queued;
 
     const advanced = waitFor<RoomState>(
       controller,
       S2C.State,
-      (s) => s.currentTrack?.id === 'dQw4w9WgXcQ',
+      (s) => s.currentTrack?.id === '9bZkp7q19f0',
     );
     const ack = (await controller.emitWithAck(C2S.NextTrack, {})) as Ack;
     expect(ack.ok).toBe(true);
 
     const state = await advanced;
-    expect(state.currentTrack?.id).toBe('dQw4w9WgXcQ');
+    expect(state.currentTrack?.id).toBe('9bZkp7q19f0');
     expect(state.queue.length).toBe(0);
     expect(state.isPlaying).toBe(true);
   });
@@ -357,23 +405,33 @@ describe('remote-dj server', () => {
 
   it('trackEnded from a player advances the queue', async () => {
     const room = 'QUEUE5';
+    const SECOND_URL = 'https://youtu.be/9bZkp7q19f0';
     const controller = connect();
     const player = connect();
     await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
     await player.emitWithAck(C2S.Join, { roomCode: room, role: 'player' });
 
+    // A becomes current (auto-start); B queues behind it. Register each
+    // predicate wait BEFORE its triggering emit so a fast broadcast isn't missed.
+    const onA = waitFor<RoomState>(player, S2C.State, (s) => s.currentTrack?.id === 'dQw4w9WgXcQ');
     await controller.emitWithAck(C2S.EnqueueTrack, { url: VALID_URL });
+    await onA;
+    const queued = waitFor<RoomState>(player, S2C.State, (s) =>
+      s.queue.some((t) => t.id === '9bZkp7q19f0'),
+    );
+    await controller.emitWithAck(C2S.EnqueueTrack, { url: SECOND_URL });
+    await queued;
 
     const advanced = waitFor<RoomState>(
       player,
       S2C.State,
-      (s) => s.currentTrack?.id === 'dQw4w9WgXcQ',
+      (s) => s.currentTrack?.id === '9bZkp7q19f0',
     );
     const ack = (await player.emitWithAck(C2S.TrackEnded, {})) as Ack;
     expect(ack.ok).toBe(true);
 
     const state = await advanced;
-    expect(state.currentTrack?.id).toBe('dQw4w9WgXcQ');
+    expect(state.currentTrack?.id).toBe('9bZkp7q19f0');
     expect(state.queue.length).toBe(0);
   });
 
@@ -692,23 +750,38 @@ describe('remote-dj server', () => {
   it('QUEUE-13 removeQueued at index 0 drops the head and keeps the rest', async () => {
     const room = 'QUEUE13';
     const SECOND_URL = 'https://youtu.be/9bZkp7q19f0';
+    const THIRD_URL = 'https://youtu.be/3JZ_D3ELwOQ';
     const controller = connect();
     await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
 
-    await controller.emitWithAck(C2S.EnqueueTrack, { url: VALID_URL });
+    // A becomes current (auto-start via changeTrack); B and C then queue → [B, C].
+    const hasA = waitFor<RoomState>(
+      controller,
+      S2C.State,
+      (s) => s.currentTrack?.id === 'dQw4w9WgXcQ',
+    );
+    await controller.emitWithAck(C2S.ChangeTrack, { url: VALID_URL, reason: 'A' });
+    await hasA;
+    const built = waitFor<RoomState>(
+      controller,
+      S2C.State,
+      (s) => s.queue.length === 2 && s.queue[1]?.id === '3JZ_D3ELwOQ',
+    );
     await controller.emitWithAck(C2S.EnqueueTrack, { url: SECOND_URL });
+    await controller.emitWithAck(C2S.EnqueueTrack, { url: THIRD_URL });
+    await built;
 
     const shrunk = waitFor<RoomState>(
       controller,
       S2C.State,
-      (s) => s.queue.length === 1 && s.queue[0]?.id === '9bZkp7q19f0',
+      (s) => s.queue.length === 1 && s.queue[0]?.id === '3JZ_D3ELwOQ',
     );
     const ack = (await controller.emitWithAck(C2S.RemoveQueued, { index: 0 })) as Ack;
     expect(ack.ok).toBe(true);
 
     const s = await shrunk;
     expect(s.queue.length).toBe(1);
-    expect(s.queue[0]?.id).toBe('9bZkp7q19f0');
+    expect(s.queue[0]?.id).toBe('3JZ_D3ELwOQ');
   });
 
   it('SEEK-09 rejects a progress report with non-finite or negative currentTime', async () => {
@@ -1044,8 +1117,18 @@ describe('remote-dj server', () => {
     await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
 
     await controller.emitWithAck(C2S.SetShuffle, { shuffle: true });
+    // A becomes current (auto-start); B and C then queue → [B, C].
+    const hasA = waitFor<RoomState>(
+      controller,
+      S2C.State,
+      (s) => s.currentTrack?.id === 'dQw4w9WgXcQ',
+    );
+    await controller.emitWithAck(C2S.ChangeTrack, { url: VALID_URL, reason: 'A' });
+    await hasA;
+    const built = waitFor<RoomState>(controller, S2C.State, (s) => s.queue.length === 2);
     await controller.emitWithAck(C2S.EnqueueTrack, { url: SECOND_URL });
     await controller.emitWithAck(C2S.EnqueueTrack, { url: THIRD_URL });
+    await built;
 
     const advanced = waitFor<RoomState>(
       controller,

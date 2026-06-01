@@ -141,7 +141,7 @@ interface ActivityEntry {
 
 | 동작 | 발행자 | 사유 | 효과 |
 | --- | --- | --- | --- |
-| `enqueueTrack` | Controller | **선택** | url 파싱 → `Track {id,url,title,addedBy}` 를 큐 끝에 추가. activity `enqueue`, detail `{id,url,title}` |
+| `enqueueTrack` | Controller | **선택** | url 파싱 → `Track {id,url,title,addedBy}` 를 큐 끝에 추가. activity `enqueue`, detail `{id,url,title}`. **단 방이 IDLE(`currentTrack === null`)이면 추가한 곡을 즉시 `currentTrack` 으로 승격하고(`isPlaying:true`, `playbackError:null`) 큐를 비운다 — 빈 플레이어에 곡을 넣으면 바로 재생 시작** |
 | `removeQueued` | Controller | **선택** | `index` 위치의 곡 제거(범위 밖이면 `invalid index`). activity `dequeue`, detail `{index}` |
 | `nextTrack` | Controller | **선택** | 큐 맨 앞 곡을 `currentTrack` 으로 승격하고 큐에서 제거, `isPlaying:true`. 큐가 비어있으면 no-op `{ok:true}`. activity `skip`, detail `{id}` |
 | `trackEnded` | **Player 전용** | 없음 | 플레이어가 현재 곡 종료를 보고. 자동 next처럼 동작 — 큐 있으면 승격(activity `skip`, detail `{auto:true}`), 비어있으면 `isPlaying:false` |
@@ -149,6 +149,7 @@ interface ActivityEntry {
 - **사유 정책**: `enqueueTrack` / `nextTrack` / `trackEnded` 의 사유는 **선택**이다(비면 `reason: null` 로 기록). 반면 **`changeTrack` 은 사유 필수**(`validateReason`)이며, `currentTrack` 만 설정하고 **큐를 건드리지 않는다** — 큐 모델과 독립적이다.
 - **제목 자동 채움(YouTube oEmbed)**: `changeTrack` / `enqueueTrack` 에서 `title` 이 생략되면(빈/미지정) 서버는 먼저 `title: null` 로 즉시 적용·브로드캐스트(스내피한 ack/broadcast 유지)한 뒤, **비동기**로 YouTube oEmbed(`https://www.youtube.com/oembed?url=...&format=json`, 3s 타임아웃)에서 제목을 best-effort 로 조회한다. 성공 시 해당 곡(아직 `title` 이 비어있는 `currentTrack`/큐 항목)에 제목을 채우고 **재브로드캐스트**한다. 실패/타임아웃/오류 시 `null` 로 두며 절대 곡 변경을 막지 않는다(fire-and-forget). 이미 제공된 non-null `title` 은 덮어쓰지 않는다.
 - **`trackEnded` 는 Player 전용**이다: controller가 발행하면 ack `{ ok:false, error:'player only' }`. 그 외 큐 제어 이벤트는 모두 Controller 전용이다.
+- **빈 플레이어 auto-start(QUEUE-14)**: `enqueueTrack` 시 방이 IDLE(`currentTrack === null`)이면 서버는 추가한 곡을 즉시 `currentTrack` 으로 승격하고 `isPlaying:true`, `playbackError:null`, `queue` 를 비운다. 이미 재생 중(`currentTrack !== null`)이면 큐 끝(FIFO)에만 추가한다.
 - 신규 방은 `queue: []` 로 시작한다.
 
 ## 반복/셔플/다음곡 결정 (repeat / shuffle / advance)

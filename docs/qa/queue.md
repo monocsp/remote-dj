@@ -6,13 +6,16 @@
 
 ---
 
-## QUEUE-01 — 곡 추가는 state.queue에 쌓이고 enqueue로 기록
+## QUEUE-01 — 재생 중일 때 곡 추가는 state.queue에 쌓이고 enqueue로 기록
 SPEC: §재생 큐 — `enqueueTrack` 은 큐 끝에 Track 추가, activity `enqueue`.
+**전제**: 방이 IDLE 이면 첫 enqueue 는 auto-start 되므로(QUEUE-14), 큐잉을 검증하려면
+먼저 다른 곡으로 재생 중 상태를 만든다(`changeTrack` 또는 한 번 enqueue 하여 auto-start).
 
-- **Given** Player + Controller가 같은 방
-- **When** Controller가 `enqueueTrack { url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' }` (사유 없음)
-- **Then** ack `{ ok: true }`; 방의 모든 소켓이 `state` 수신, `queue` 에 `id === 'dQw4w9WgXcQ'` 곡 포함,
-  `currentTrack` 은 변하지 않음(null 유지); `activity` 1건 `type === 'enqueue'`
+- **Given** Player + Controller가 같은 방, 이미 `currentTrack` 이 재생 중
+  (예: `changeTrack { url: '...dQw4w9WgXcQ', reason }` 로 A 를 현재 곡으로 만든 뒤)
+- **When** Controller가 `enqueueTrack { url: 'https://youtu.be/9bZkp7q19f0' }` (사유 없음)
+- **Then** ack `{ ok: true }`; 방의 모든 소켓이 `state` 수신, `queue` 에 `id === '9bZkp7q19f0'` 곡 포함,
+  `currentTrack` 은 변하지 않음(A 유지); `activity` 1건 `type === 'enqueue'`
 
 ## QUEUE-02 — 곡 추가 사유는 선택 (없으면 reason=null)
 SPEC: §재생 큐 — enqueue 사유는 선택.
@@ -51,10 +54,12 @@ SPEC: §재생 큐 — `index` 가 `[0, queue.length)` 정수가 아니면 거�
 
 ## QUEUE-07 — nextTrack은 큐 맨 앞을 currentTrack으로 승격하고 큐를 줄임
 SPEC: §재생 큐 — `nextTrack` 큐 비어있지 않으면 head→currentTrack, isPlaying:true, activity `skip`.
+**전제**: 큐를 채우려면 먼저 다른 곡(A)을 재생 중으로 만든 뒤 B 를 enqueue 한다
+(IDLE 방에 첫 enqueue 하면 B 가 곧장 auto-start 되어 큐에 남지 않으므로).
 
-- **Given** 큐에 `id === 'dQw4w9WgXcQ'` 1곡이 있는 controller
+- **Given** 현재 곡 A 가 재생 중이고 큐에 `id === '9bZkp7q19f0'`(B) 1곡이 있는 controller
 - **When** `nextTrack {}`
-- **Then** ack `{ ok: true }`; `state.currentTrack.id === 'dQw4w9WgXcQ'`, `queue.length === 0`,
+- **Then** ack `{ ok: true }`; `state.currentTrack.id === '9bZkp7q19f0'`, `queue.length === 0`,
   `isPlaying === true`; `activity` `type === 'skip'`
 
 ## QUEUE-08 — 빈 큐에서 nextTrack은 no-op 성공
@@ -67,9 +72,10 @@ SPEC: §재생 큐 — 큐가 비어있으면 `{ ok:true }` no-op(브로드캐�
 ## QUEUE-09 — Player의 trackEnded는 큐를 자동 진행
 SPEC: §재생 큐 — `trackEnded` (Player 전용)는 자동 next, activity `skip` detail `{auto:true}`.
 
-- **Given** Player + Controller, 큐에 `id === 'dQw4w9WgXcQ'` 1곡
+- **Given** Player + Controller, 현재 곡 A 재생 중 + 큐에 `id === '9bZkp7q19f0'`(B) 1곡
+  (IDLE 방에 첫 enqueue 하면 auto-start 되므로 먼저 A 를 재생 중으로 만든 뒤 B 를 enqueue)
 - **When** Player가 `trackEnded {}`
-- **Then** ack `{ ok: true }`; `state.currentTrack.id === 'dQw4w9WgXcQ'`, `queue.length === 0`;
+- **Then** ack `{ ok: true }`; `state.currentTrack.id === '9bZkp7q19f0'`, `queue.length === 0`;
   `activity` `type === 'skip'`, `detail.auto === true`
 
 ## QUEUE-10 — 빈 큐에서 trackEnded는 재생 정지
@@ -100,3 +106,13 @@ SPEC: §재생 큐 — `changeTrack` 은 사유 필수, `currentTrack` 만 설�
 - **When** 유효한 `changeTrack { url, reason }`
 - **Then** ack `{ ok: true }`; `currentTrack` 이 새 곡으로, `state.queue` 는 그대로 유지
   (사유 빈 경우는 TRK-01대로 `reason required` 거부)
+
+## QUEUE-14 — IDLE 방에 곡 추가는 즉시 재생 시작(auto-start)
+SPEC: §재생 큐 — 방이 IDLE(`currentTrack === null`)일 때 `enqueueTrack` 은 추가한 곡을
+즉시 `currentTrack` 으로 승격(`isPlaying:true`, `playbackError:null`)하고 큐를 비운다.
+이미 재생 중이면 큐 끝(FIFO)에만 추가한다.
+
+- **Given** 새로 만든 IDLE 방의 controller(`currentTrack === null`, `queue` 비어있음)
+- **When** `enqueueTrack { url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' }` (사유 없음)
+- **Then** ack `{ ok: true }`; 브로드캐스트 `state.currentTrack.id === 'dQw4w9WgXcQ'`,
+  `isPlaying === true`, `queue.length === 0`; `activity` 1건 `type === 'enqueue'`
