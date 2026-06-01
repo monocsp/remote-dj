@@ -28,6 +28,7 @@ from contract import (
     PROGRESS,
     REMOVE_QUEUED,
     SEEK_TO,
+    SET_TRACK_GAIN,
     SET_VOLUME,
     TOGGLE_PLAY,
     TRACK_ENDED,
@@ -673,3 +674,33 @@ def test_SEC_01_password_not_in_state(make_client):
     for s in observer.states:
         assert "password" not in s
         assert "secret" not in _json.dumps(s)
+
+
+# ── GAIN-01: setTrackGain broadcasts trackGain[id] + logs a gain activity ───
+def test_GAIN_01_set_track_gain_manual(make_client):
+    c = make_client()
+    room = room_code()
+    c.join(room)
+    c.states.clear()
+    c.activities.clear()
+    ack = c.call(SET_TRACK_GAIN, {"videoId": VALID_ID, "gain": 0.5})
+    assert ack["ok"] is True
+    st = c.wait_for_state(lambda s: s.get("trackGain", {}).get(VALID_ID) == 0.5)
+    assert st is not None
+    assert st["trackGain"][VALID_ID] == 0.5
+    gains = [a for a in c.activities if a["type"] == "gain"]
+    assert gains and gains[-1].get("detail", {}).get("gain") == 0.5
+
+
+# ── GAIN-03: changeTrack auto-seeds trackGain from YouTube loudnessDb ────────
+def test_GAIN_03_auto_seed_from_loudness(make_client):
+    c = make_client()
+    room = room_code()
+    c.join(room)
+    c.states.clear()
+    # No manual gain: the server auto-seeds from loudnessDb (env +6 dB ⇒ ~0.5).
+    ack = c.call(CHANGE_TRACK, {"url": VALID_URL, "reason": "분위기"})
+    assert ack["ok"] is True
+    st = c.wait_for_state(lambda s: 0 < s.get("trackGain", {}).get(VALID_ID, 1) < 1)
+    assert st is not None
+    assert 0 < st["trackGain"][VALID_ID] < 1

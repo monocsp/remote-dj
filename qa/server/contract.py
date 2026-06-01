@@ -42,6 +42,7 @@ TRACK_ENDED = C2S["TrackEnded"]
 SEEK_TO = C2S["SeekTo"]
 PROGRESS = C2S["Progress"]
 PLAYBACK_ERROR = C2S["PlaybackError"]
+SET_TRACK_GAIN = C2S["SetTrackGain"]
 
 EV_STATE = S2C["State"]
 EV_ACTIVITY = S2C["Activity"]

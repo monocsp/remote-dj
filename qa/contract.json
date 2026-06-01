@@ -11,7 +11,8 @@
     "TrackEnded": "trackEnded",
     "SeekTo": "seekTo",
     "Progress": "progress",
-    "PlaybackError": "playbackError"
+    "PlaybackError": "playbackError",
+    "SetTrackGain": "setTrackGain"
   },
   "s2c": {
     "State": "state",

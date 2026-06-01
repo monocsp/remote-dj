@@ -37,9 +37,15 @@ describe('remote-dj server', () => {
   }
 
   beforeEach(async () => {
-    // Stub the title resolver so tests never hit the network and are
-    // deterministic (keep the default in-memory store).
-    ({ io, httpServer } = createServer(undefined, async () => 'Stub Title'));
+    // Stub the title + loudness resolvers so tests never hit the network and
+    // are deterministic (keep the default in-memory store). The loudness stub
+    // returns null so loudness auto-seed is a no-op in most tests; GAIN-03/04
+    // create their own server with a loud stub.
+    ({ io, httpServer } = createServer(
+      undefined,
+      async () => 'Stub Title',
+      async () => null,
+    ));
     await new Promise<void>((resolve) => {
       httpServer.listen(0, '127.0.0.1', () => resolve());
     });
@@ -796,6 +802,154 @@ describe('remote-dj server', () => {
     for (const s of seen) {
       expect(Object.keys(s)).not.toContain('password');
       expect(JSON.stringify(s)).not.toContain('secret');
+    }
+  });
+
+  // ── GAIN-xx: per-track loudness normalization ───────────────────────────────
+
+  it('GAIN-01 setTrackGain broadcasts trackGain[id] and logs a gain activity', async () => {
+    const room = 'GAIN01';
+    const controller = connect();
+    const player = connect();
+    await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+    await player.emitWithAck(C2S.Join, { roomCode: room, role: 'player' });
+
+    const hasGain = (s: RoomState) => s.trackGain.dQw4w9WgXcQ === 0.5;
+    const isGain = (a: ActivityEntry) => a.type === 'gain';
+    const playerState = waitFor<RoomState>(player, S2C.State, hasGain);
+    const playerActivity = waitFor<ActivityEntry>(player, S2C.Activity, isGain);
+
+    const ack = (await controller.emitWithAck(C2S.SetTrackGain, {
+      videoId: 'dQw4w9WgXcQ',
+      gain: 0.5,
+    })) as Ack;
+    expect(ack.ok).toBe(true);
+
+    const [ps, pa] = await Promise.all([playerState, playerActivity]);
+    expect(ps.trackGain.dQw4w9WgXcQ).toBe(0.5);
+    expect(pa.type).toBe('gain');
+    expect((pa.detail as { gain: number }).gain).toBe(0.5);
+  });
+
+  it('GAIN-02 clamps setTrackGain to [0.2, 1.0]', async () => {
+    const room = 'GAIN02';
+    const controller = connect();
+    await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+
+    const high = waitFor<RoomState>(controller, S2C.State, (s) => s.trackGain.aaaaaaaaaaa === 1.0);
+    const highAck = (await controller.emitWithAck(C2S.SetTrackGain, {
+      videoId: 'aaaaaaaaaaa',
+      gain: 5,
+    })) as Ack;
+    expect(highAck.ok).toBe(true);
+    expect((await high).trackGain.aaaaaaaaaaa).toBe(1.0);
+
+    const low = waitFor<RoomState>(controller, S2C.State, (s) => s.trackGain.bbbbbbbbbbb === 0.2);
+    const lowAck = (await controller.emitWithAck(C2S.SetTrackGain, {
+      videoId: 'bbbbbbbbbbb',
+      gain: 0,
+    })) as Ack;
+    expect(lowAck.ok).toBe(true);
+    expect((await low).trackGain.bbbbbbbbbbb).toBe(0.2);
+  });
+
+  it('GAIN-03 auto-seeds trackGain from a loud YouTube loudnessDb on changeTrack', async () => {
+    // Dedicated server: loudness stub reports +6 dB ⇒ factor ≈ 10^(-6/20) ≈ 0.5.
+    const local = createServer(
+      undefined,
+      async () => 'T',
+      async () => 6,
+    );
+    await new Promise<void>((resolve) => local.httpServer.listen(0, '127.0.0.1', () => resolve()));
+    const localPort = (local.httpServer.address() as AddressInfo).port;
+    const localClients: ClientSocket[] = [];
+    const localConnect = () => {
+      const s = ioClient(`http://127.0.0.1:${localPort}`, { forceNew: true });
+      localClients.push(s);
+      return s;
+    };
+
+    try {
+      const controller = localConnect();
+      await controller.emitWithAck(C2S.Join, { roomCode: 'GAIN03', role: 'controller' });
+
+      const seeded = waitFor<RoomState>(controller, S2C.State, (s) => {
+        const g = s.trackGain.dQw4w9WgXcQ;
+        return g !== undefined && g < 1;
+      });
+      const ack = (await controller.emitWithAck(C2S.ChangeTrack, {
+        url: VALID_URL,
+        reason: 'auto seed',
+      })) as Ack;
+      expect(ack.ok).toBe(true);
+
+      const s = await seeded;
+      expect(s.trackGain.dQw4w9WgXcQ).toBeCloseTo(0.5, 2);
+    } finally {
+      for (const c of localClients) c.disconnect();
+      local.io.close();
+      await new Promise<void>((resolve) => local.httpServer.close(() => resolve()));
+    }
+  });
+
+  it('GAIN-04 auto-seed never overwrites a manually set gain', async () => {
+    // Loudness stub reports +6 dB (would auto-seed ≈0.5), but a manual 0.8 wins.
+    const local = createServer(
+      undefined,
+      async () => 'T',
+      async () => 6,
+    );
+    await new Promise<void>((resolve) => local.httpServer.listen(0, '127.0.0.1', () => resolve()));
+    const localPort = (local.httpServer.address() as AddressInfo).port;
+    const localClients: ClientSocket[] = [];
+    const localConnect = () => {
+      const s = ioClient(`http://127.0.0.1:${localPort}`, { forceNew: true });
+      localClients.push(s);
+      return s;
+    };
+
+    try {
+      const controller = localConnect();
+      await controller.emitWithAck(C2S.Join, { roomCode: 'GAIN04', role: 'controller' });
+
+      const manual = waitFor<RoomState>(
+        controller,
+        S2C.State,
+        (s) => s.trackGain.dQw4w9WgXcQ === 0.8,
+      );
+      await controller.emitWithAck(C2S.SetTrackGain, { videoId: 'dQw4w9WgXcQ', gain: 0.8 });
+      await manual;
+
+      const advanced = waitFor<RoomState>(
+        controller,
+        S2C.State,
+        (s) => s.currentTrack?.id === 'dQw4w9WgXcQ',
+      );
+      const ack = (await controller.emitWithAck(C2S.ChangeTrack, {
+        url: VALID_URL,
+        reason: 'manual wins',
+      })) as Ack;
+      expect(ack.ok).toBe(true);
+      await advanced;
+
+      // Give any fire-and-forget auto-seed a beat to (not) run, then assert
+      // the manual value is unchanged.
+      await new Promise<void>((resolve) => setTimeout(resolve, 100));
+      const rec = await controller.emitWithAck(C2S.SetTrackGain, {
+        videoId: 'unused0only0',
+        gain: 1,
+      });
+      expect((rec as Ack).ok).toBe(true);
+      const latest = await waitFor<RoomState>(
+        controller,
+        S2C.State,
+        (s) => s.trackGain.unused0only0 !== undefined,
+      );
+      expect(latest.trackGain.dQw4w9WgXcQ).toBe(0.8);
+    } finally {
+      for (const c of localClients) c.disconnect();
+      local.io.close();
+      await new Promise<void>((resolve) => local.httpServer.close(() => resolve()));
     }
   });
 });

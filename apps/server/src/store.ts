@@ -40,6 +40,7 @@ function createInitialState(roomCode: string): RoomState {
     progress: null,
     lastSeek: null,
     playbackError: null,
+    trackGain: {},
   };
 }
 

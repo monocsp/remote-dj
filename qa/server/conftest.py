@@ -59,6 +59,9 @@ def server_url() -> str:
         "HOSTNAME": "127.0.0.1",
         # Deterministic title for the black-box server (no network).
         "REMOTE_DJ_FAKE_TITLE": "QA Title",
+        # Deterministic loudness (+6 dB) so loudness auto-seed yields ~0.5
+        # for any new track (no network).
+        "REMOTE_DJ_FAKE_LOUDNESS": "6",
     }
     # Prefer the workspace dev:server script; fall back to direct tsx run.
     cmd = ["npm", "run", "dev:server"]

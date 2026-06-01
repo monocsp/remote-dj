@@ -33,6 +33,10 @@ export interface RoomState {
   lastSeek: { seconds: number; ts: number } | null;
   // Latest player-reported playback error; null when none / cleared on a new track.
   playbackError: { code: number; ts: number } | null;
+  // Per-track loudness-normalization gain: videoId → attenuation factor in
+  // [0.2, 1.0]. Absent ⇒ 1.0 (no change). We can only ATTENUATE (YouTube
+  // setVolume maxes at 100), so gain is always ≤ 1. Shared across the room.
+  trackGain: Record<string, number>;
 }
 
 export type ActivityType =
@@ -44,7 +48,8 @@ export type ActivityType =
   | 'enqueue'
   | 'dequeue'
   | 'skip'
-  | 'seek';
+  | 'seek'
+  | 'gain';
 
 export interface ActivityEntry {
   id: string;
@@ -119,6 +124,13 @@ export interface PlaybackErrorPayload {
   code: number;
 }
 
+// Controller sets the per-track loudness-normalization gain (attenuation only).
+export interface SetTrackGainPayload {
+  videoId: string;
+  gain: number; // clamped to [0.2, 1.0]
+  reason?: string;
+}
+
 export interface Ack {
   ok: boolean;
   error?: string;
@@ -138,6 +150,7 @@ export const C2S = {
   SeekTo: 'seekTo',
   Progress: 'progress',
   PlaybackError: 'playbackError',
+  SetTrackGain: 'setTrackGain',
 } as const;
 
 export const S2C = {
@@ -200,6 +213,14 @@ export function validateReason(r: string): boolean {
 /** Round then clamp to [0, 100]. */
 export function clampVolume(v: number): number {
   return Math.max(0, Math.min(100, Math.round(v)));
+}
+
+/**
+ * Round to 2 decimals then clamp to [0.2, 1.0]. Loudness gain is
+ * attenuate-only (≤ 1) since YouTube setVolume tops out at 100.
+ */
+export function clampGain(g: number): number {
+  return Math.max(0.2, Math.min(1.0, Math.round(g * 100) / 100));
 }
 
 /** Max accepted lengths for free-form string inputs (chars). */

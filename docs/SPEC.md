@@ -58,6 +58,7 @@ type Role = 'player' | 'controller';
 | `seekTo` | C→S | `{ seconds: number; reason?: string }` | **Controller 전용**. `seconds` 가 유한수 `>= 0` 가 아니면 `{ ok:false, error:'invalid seconds' }`. `lastSeek` 갱신, activity `seek`, detail `{seconds}`. **사유 선택** |
 | `progress` | C→S | `{ currentTime: number; duration: number }` | **Player 전용**(controller가 발행 시 `{ ok:false, error:'player only' }`). `currentTime`/`duration` 이 유한수 `>= 0` 가 아니면 `{ ok:false, error:'invalid progress' }`. `progress` 갱신 + 브로드캐스트. **로그 기록 안 함**(고빈도) |
 | `playbackError` | C→S | `{ code: number }` | **Player 전용**(controller가 발행 시 `{ ok:false, error:'player only' }`). `code` 가 유한수가 아니면 `{ ok:false, error:'invalid code' }`. `playbackError = { code, ts }` 갱신 + 브로드캐스트. **로그 기록 안 함**(상태로만 노출). 새 곡 시도 시 초기화 |
+| `setTrackGain` | C→S | `{ videoId: string; gain: number; reason?: string }` | **Controller 전용**. `videoId` 가 비어있지 않은 문자열이 아니면 `{ ok:false, error:'invalid videoId' }`. `clampGain(gain)` 으로 `[0.2, 1.0]` 보정 후 `trackGain[videoId]` 에 설정, activity `gain`, detail `{videoId, gain}`, 브로드캐스트. **사유 선택** |
 | `state` | S→C | `RoomState` | join 직후 + 모든 변경 후 브로드캐스트 |
 | `activity` | S→C | `ActivityEntry` | 신규 항목 1건 |
 | `activityLog` | S→C | `ActivityEntry[]` | join 직후 전체 로그 |
@@ -95,11 +96,14 @@ interface RoomState {
   lastSeek: { seconds: number; ts: number } | null;
   // 최신 Player 보고 재생 오류(없거나 새 곡 시도 시 null)
   playbackError: { code: number; ts: number } | null;
+  // 곡별 음량 정규화 게인: videoId → 감쇠 계수 [0.2, 1.0]. 없으면 1.0(변경 없음).
+  // setVolume 이 100 을 넘지 못하므로 감쇠(≤1)만 가능. 방 전체 공유.
+  trackGain: Record<string, number>;
 }
 
 type ActivityType =
   | 'track_change' | 'volume' | 'play' | 'pause' | 'settings'
-  | 'enqueue' | 'dequeue' | 'skip' | 'seek';
+  | 'enqueue' | 'dequeue' | 'skip' | 'seek' | 'gain';
 
 interface ActivityEntry {
   id: string;
@@ -155,6 +159,33 @@ interface ActivityEntry {
 - **Player UI**: onError 발생 시 코드별 한국어 메시지 + "다시 시도" 버튼(`loadVideoById` 재시도) 배너를 띄우고, 정상 재생(`PLAYING`) 시 배너를 지운다.
 - **Controller UI**: `state.playbackError` 가 있으면 now-playing 근처에 "⚠ Player 재생 오류 (코드 {code})" 경고를 표시한다.
 
+## 음량 정규화 (Loudness Normalization)
+
+곡마다 기본 음량이 제각각이라 곡이 바뀔 때마다 체감 음량이 들쭉날쭉하다. 이를 완화하기 위해
+방은 **곡별 게인**(`RoomState.trackGain: Record<videoId, number>`)을 가진다. 게인은 **감쇠 계수**로,
+`[0.2, 1.0]` 범위이며 **항상 ≤ 1**이다 — YouTube `setVolume` 이 100 을 넘지 못해 **증폭이 불가능**하므로
+시끄러운 곡을 **줄이는** 방향(attenuate-only)으로만 정규화한다. videoId 키가 없으면 `1.0`(변경 없음)이다.
+신규 방은 `trackGain: {}` 로 시작한다.
+
+**A) 수동 곡별 게인(`setTrackGain`)** — Controller 전용. `{ videoId, gain, reason? }` 를 받아
+`clampGain(gain)` 으로 `[0.2, 1.0]` 보정 후 `trackGain[videoId]` 에 **공유 상태**로 저장하고,
+activity `gain`(detail `{videoId, gain}`)을 남긴 뒤 브로드캐스트한다. `videoId` 가 비어있지 않은
+문자열이 아니면 `{ ok:false, error:'invalid videoId' }`. 사유는 선택.
+
+**B) YouTube loudnessDb 자동 시드(auto-seed)** — `changeTrack`/`enqueueTrack` 직후, 서버는
+**fire-and-forget**(제목 자동 채움과 동일 패턴)으로 해당 곡의 라우드니스를 best-effort 조회한다.
+조회는 **비공식(unofficial) innertube `player` 엔드포인트**(`playerConfig.audioConfig.loudnessDb`)를
+4s 타임아웃으로 POST 하며, 언제든 깨질 수 있다(문서화된 API 아님). 결과 `loudnessDb`(곡이 YouTube
+기준보다 얼마나 큰지, dB)로부터 `factor = clampGain(min(1, 10^(-loudnessDb/20)))` 를 계산한다.
+- **수동/기존 값 우선**: 해당 videoId 에 이미 게인이 있으면(수동 또는 이전 자동) **덮어쓰지 않는다**.
+- **실패 ⇒ no-op**: 조회 실패/타임아웃/비-ok/비숫자(`null`)면 아무 것도 하지 않으며 곡 변경을 절대 막지 않는다.
+- **무변화 스킵**: `factor >= 1`(감쇠 불필요)이면 저장하지 않는다.
+- 자동 시드는 **activity 를 남기지 않는다**(로그 오염 방지). 결정적 테스트/QA 를 위해 환경변수
+  `REMOTE_DJ_FAKE_LOUDNESS` 가 설정되면 네트워크 없이 그 값을 라우드니스로 사용한다.
+
+**Player 적용**: Player 는 `effectiveVolume = clamp(round(volume × (trackGain[currentTrack.id] ?? 1)))`
+로 실제 재생 음량을 계산해 적용한다(master `volume` 은 그대로 두고 곡별로만 감쇠).
+
 ## 검증 규칙
 
 | 대상 | 규칙 | 위반 시 |
@@ -162,6 +193,7 @@ interface ActivityEntry {
 | 곡 변경 사유 | `validateReason(reason)` = trim 후 비어있지 않음 | ack `{ ok:false, error:'reason required' }` |
 | 곡 URL | `parseYouTubeId(url)` 가 video id 반환(비-null) | ack `{ ok:false, error:'invalid youtube url' }` |
 | 음량 | `clampVolume(v)` = 반올림 후 0..100 클램프 | 자동 보정(에러 아님) |
+| 곡 게인 | `clampGain(g)` = 소수 2자리 반올림 후 0.2..1.0 클램프 | 자동 보정(에러 아님). `videoId` 빈 문자열은 `invalid videoId` |
 | 제어 권한 | role === `'controller'` | Player가 발행 시 ack `{ ok:false }` |
 | 그 외 사유 | 선택 — 비어있으면 `reason: null` 로 기록 | — |
 | 익명 콘텐츠 제한 | `settings.allowAnonymous === false` 인 방에서, **콘텐츠 액션**(`changeTrack`/`enqueueTrack`/`nextTrack`)은 닉네임 없는 소켓에서 거부. 권한(컨트롤러) 검사 통과 후 적용 | ack `{ ok:false, error:'nickname required' }` |
@@ -175,6 +207,7 @@ interface ActivityEntry {
 | `parseYouTubeId` | `(url: string) => string \| null` | 다양한 YouTube URL 형태에서 video id 추출, 실패 시 null |
 | `validateReason` | `(r: string) => boolean` | trim 후 비어있지 않으면 true |
 | `clampVolume` | `(v: number) => number` | 반올림 후 0..100 |
+| `clampGain` | `(g: number) => number` | 소수 2자리 반올림 후 0.2..1.0 (감쇠 전용) |
 | `generateRoomCode` | `() => string` | 6자 룸 코드 생성 |
 
 ## Activity Log 스키마 + 예시
@@ -244,6 +277,7 @@ interface ActivityEntry {
 | `seekTo` | X | O |
 | `progress` | **O** | X |
 | `playbackError` | **O** | X |
+| `setTrackGain` | X | O |
 
 ## 비범위 (추후)
 

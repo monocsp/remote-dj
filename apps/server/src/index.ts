@@ -17,10 +17,12 @@ import {
   type RoomState,
   S2C,
   type SeekToPayload,
+  type SetTrackGainPayload,
   type SetVolumePayload,
   type TogglePlayPayload,
   type Track,
   type UpdateSettingsPayload,
+  clampGain,
   clampVolume,
   parseYouTubeId,
   validateReason,
@@ -43,6 +45,9 @@ const ROOM_TTL_MS = 5 * 60_000;
 
 /** Timeout for the YouTube oEmbed title lookup. */
 const TITLE_FETCH_TIMEOUT_MS = 3_000;
+
+/** Timeout for the (unofficial) YouTube loudness lookup. */
+const LOUDNESS_FETCH_TIMEOUT_MS = 4_000;
 
 /**
  * Best-effort resolver for a YouTube track title via the public oEmbed endpoint.
@@ -70,12 +75,56 @@ export async function defaultResolveTitle(url: string): Promise<string | null> {
 }
 
 /**
+ * Best-effort resolver for a YouTube track's integrated loudness (dB) via the
+ * UNOFFICIAL innertube player endpoint (`playerConfig.audioConfig.loudnessDb`).
+ * This endpoint is undocumented and may break at any time — see docs/SPEC.md
+ * §음량 정규화. Never throws: returns the loudnessDb number on success, or null
+ * on any error/timeout/non-ok response. When REMOTE_DJ_FAKE_LOUDNESS is set,
+ * returns Number(env) without any network access (deterministic tests / QA).
+ */
+export async function defaultResolveLoudness(videoId: string): Promise<number | null> {
+  const fake = process.env.REMOTE_DJ_FAKE_LOUDNESS;
+  if (fake != null && fake !== '') {
+    const n = Number(fake);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), LOUDNESS_FETCH_TIMEOUT_MS);
+  try {
+    const res = await fetch(
+      'https://www.youtube.com/youtubei/v1/player?key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8',
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          videoId,
+          context: { client: { clientName: 'WEB', clientVersion: '2.20240101.00.00' } },
+        }),
+        signal: controller.signal,
+      },
+    );
+    if (!res.ok) return null;
+    const data = (await res.json()) as {
+      playerConfig?: { audioConfig?: { loudnessDb?: unknown } };
+    };
+    const loudness = data.playerConfig?.audioConfig?.loudnessDb;
+    return typeof loudness === 'number' && Number.isFinite(loudness) ? loudness : null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
  * Wire an HTTP server + Socket.IO Server with all room handlers.
  * Exported (not auto-listening) so tests can listen on an ephemeral port.
  */
 export function createServer(
   store: RoomStore = new InMemoryRoomStore(),
   resolveTitle: (url: string) => Promise<string | null> = defaultResolveTitle,
+  resolveLoudness: (videoId: string) => Promise<number | null> = defaultResolveLoudness,
 ): {
   httpServer: HttpServer;
   io: Server;
@@ -155,6 +204,40 @@ export function createServer(
 
     if (!changed) return;
     await store.patchState(roomCode, { currentTrack, queue });
+    await broadcastState(roomCode);
+  }
+
+  /**
+   * Auto-seed (B) the per-track loudness gain from YouTube's loudnessDb.
+   * Fire-and-forget mirror of enrichTitle: best-effort, never throws, never
+   * delays the original ack/broadcast. A MANUAL/existing gain always wins — if
+   * one is already set for this videoId we leave it untouched. On lookup
+   * failure (null) it is a no-op. Computes the attenuation factor that would
+   * bring this track to YouTube's reference (factor = 10^(-loudnessDb/20),
+   * capped at 1) and only persists it when attenuation is actually needed
+   * (factor < 1) to avoid a pointless no-op patch. NOT recorded as an activity
+   * (auto-seed should not spam the log).
+   */
+  async function enrichGain(roomCode: string, videoId: string): Promise<void> {
+    const existing = await store.get(roomCode);
+    if (!existing) return;
+    // Manual / existing gain wins — never overwrite it via auto-seed.
+    if (existing.state.trackGain[videoId] !== undefined) return;
+
+    const loudness = await resolveLoudness(videoId);
+    if (loudness == null) return;
+
+    const factor = clampGain(Math.min(1, 10 ** (-loudness / 20)));
+    // Skip the no-op: only persist when actual attenuation is needed.
+    if (factor >= 1) return;
+
+    const rec = await store.get(roomCode);
+    if (!rec) return;
+    // Re-check after the await: a manual gain may have arrived meanwhile.
+    if (rec.state.trackGain[videoId] !== undefined) return;
+    await store.patchState(roomCode, {
+      trackGain: { ...rec.state.trackGain, [videoId]: factor },
+    });
     await broadcastState(roomCode);
   }
 
@@ -331,6 +414,8 @@ export function createServer(
       // No title provided: fill it from YouTube oEmbed asynchronously and
       // re-broadcast. Fire-and-forget so ack/broadcast timing is unchanged.
       if (!track.title) void enrichTitle(room, url, id);
+      // Auto-seed (B) the loudness gain best-effort; never overwrites manual.
+      void enrichGain(room, id);
     });
 
     socket.on(C2S.SetVolume, async (payload: SetVolumePayload, ack: AckFn) => {
@@ -416,6 +501,8 @@ export function createServer(
       // No title provided: fill it from YouTube oEmbed asynchronously and
       // re-broadcast. Fire-and-forget so ack/broadcast timing is unchanged.
       if (!track.title) void enrichTitle(room, url, id);
+      // Auto-seed (B) the loudness gain best-effort; never overwrites manual.
+      void enrichGain(room, id);
     });
 
     socket.on(C2S.RemoveQueued, async (payload: RemoveQueuedPayload, ack: AckFn) => {
@@ -551,6 +638,29 @@ export function createServer(
 
       // A status, surfaced via RoomState only (like progress) — NOT logged.
       await store.patchState(room, { playbackError: { code, ts: Date.now() } });
+      ack({ ok: true });
+      await broadcastState(room);
+    });
+
+    socket.on(C2S.SetTrackGain, async (payload: SetTrackGainPayload, ack: AckFn) => {
+      const room = requireController(ack);
+      if (!room) return;
+      const { videoId, gain, reason } = payload ?? ({} as SetTrackGainPayload);
+      if (!withinLimit(reason, LIMITS.reason)) {
+        ack({ ok: false, error: 'input too long' });
+        return;
+      }
+      if (typeof videoId !== 'string' || videoId === '') {
+        ack({ ok: false, error: 'invalid videoId' });
+        return;
+      }
+      const g = clampGain(gain);
+
+      const record = await store.getOrCreate(room);
+      await store.patchState(room, {
+        trackGain: { ...record.state.trackGain, [videoId]: g },
+      });
+      await recordActivity('gain', reason?.trim() || null, { videoId, gain: g });
       ack({ ok: true });
       await broadcastState(room);
     });
