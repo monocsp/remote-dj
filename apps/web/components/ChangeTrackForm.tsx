@@ -1,5 +1,6 @@
 'use client';
 
+import { koError } from '@/lib/errors';
 import type { Ack } from '@remote-dj/shared';
 import { type FormEvent, useState } from 'react';
 
@@ -28,7 +29,7 @@ export function ChangeTrackForm({
       setReason('');
       setTitle('');
     } else {
-      setError(ack.error ?? '곡 변경 실패');
+      setError(koError(ack.error));
     }
   }
 

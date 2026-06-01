@@ -13,3 +13,29 @@
     font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   }
 }
+
+@layer components {
+  /* Slim visible track but a >=44px interactive area for touch targets. */
+  .range-touch {
+    height: 44px;
+    cursor: pointer;
+    background: transparent;
+    -webkit-appearance: none;
+    appearance: none;
+  }
+
+  .range-touch::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    height: 24px;
+    width: 24px;
+    border-radius: 9999px;
+  }
+
+  .range-touch::-moz-range-thumb {
+    height: 24px;
+    width: 24px;
+    border: none;
+    border-radius: 9999px;
+  }
+}

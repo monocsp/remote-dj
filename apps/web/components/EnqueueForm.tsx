@@ -1,5 +1,6 @@
 'use client';
 
+import { koError } from '@/lib/errors';
 import type { Ack } from '@remote-dj/shared';
 import { type FormEvent, useState } from 'react';
 
@@ -29,7 +30,7 @@ export function EnqueueForm({
       setReason('');
       setTitle('');
     } else {
-      setError(ack.error ?? '대기열 추가 실패');
+      setError(koError(ack.error));
     }
   }
 

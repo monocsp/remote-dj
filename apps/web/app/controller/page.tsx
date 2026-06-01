@@ -88,7 +88,7 @@ function ControllerInner() {
     <main className="mx-auto flex min-h-screen w-full max-w-md flex-col gap-5 px-5 py-8">
       <header className="flex items-center justify-between">
         <div>
-          <p className="text-xs text-neutral-500">방 코드</p>
+          <p className="text-xs text-neutral-400">방 코드</p>
           <p className="text-2xl font-bold tracking-[0.2em]">{room || '—'}</p>
         </div>
         <span className={`text-xs ${connected ? 'text-emerald-400' : 'text-neutral-500'}`}>
@@ -98,7 +98,7 @@ function ControllerInner() {
 
       {/* now-playing card */}
       <section className="rounded-xl bg-neutral-900 p-4">
-        <p className="text-xs uppercase tracking-wide text-neutral-500">현재 곡</p>
+        <p className="text-xs uppercase tracking-wide text-neutral-400">현재 곡</p>
         <p className="mt-1 text-lg font-semibold">
           {track?.title ?? (track ? '(제목 없음)' : '재생 중인 곡 없음')}
         </p>
@@ -127,20 +127,20 @@ function ControllerInner() {
 
       {/* queue (대기열) */}
       <section className="rounded-xl bg-neutral-900 p-4">
-        <div className="mb-3 flex items-center justify-between">
+        <div className="mb-3 flex items-center justify-between gap-6">
           <h2 className="text-sm font-semibold text-neutral-300">대기열</h2>
           <button
             type="button"
             onClick={() => void actions.nextTrack()}
             disabled={queue.length === 0}
-            className="rounded-lg bg-emerald-500 px-3 py-1.5 text-xs font-bold text-neutral-950 transition disabled:opacity-40"
+            className="min-h-[44px] rounded-lg bg-emerald-500 px-3 text-xs font-bold text-neutral-950 transition disabled:opacity-40"
           >
             다음 곡
           </button>
         </div>
 
         {queue.length === 0 ? (
-          <p className="py-4 text-center text-sm text-neutral-500">대기열이 비어 있습니다.</p>
+          <p className="py-4 text-center text-sm text-neutral-400">대기열이 비어 있습니다.</p>
         ) : (
           <ul className="mb-3 flex flex-col gap-2">
             {queue.map((item, index) => (
@@ -152,7 +152,7 @@ function ControllerInner() {
                   <p className="truncate text-sm font-medium text-neutral-200">
                     {item.title ?? '(제목 없음)'}
                   </p>
-                  <p className="truncate text-xs text-neutral-500">{item.url}</p>
+                  <p className="truncate text-xs text-neutral-400">{item.url}</p>
                 </div>
                 <button
                   type="button"
@@ -172,7 +172,7 @@ function ControllerInner() {
       {/* settings (설정) */}
       <section className="rounded-xl bg-neutral-900 p-4">
         <h2 className="mb-3 text-sm font-semibold text-neutral-300">설정</h2>
-        <label className="flex items-center gap-2 text-sm text-neutral-200">
+        <label className="flex min-h-[44px] items-center gap-3 py-2 text-sm text-neutral-200">
           <input
             type="checkbox"
             checked={anon}
@@ -180,7 +180,7 @@ function ControllerInner() {
               setAnon(e.target.checked);
               void actions.updateSettings({ allowAnonymous: e.target.checked });
             }}
-            className="h-4 w-4 accent-emerald-500"
+            className="h-6 w-6 accent-emerald-500"
           />
           익명 허용 (allowAnonymous)
         </label>
@@ -190,7 +190,7 @@ function ControllerInner() {
       </section>
 
       {/* volume + play/pause */}
-      <section className="flex flex-col gap-4 rounded-xl bg-neutral-900 p-4">
+      <section className="flex flex-col gap-6 rounded-xl bg-neutral-900 p-4">
         <div>
           <div className="mb-2 flex items-center justify-between text-sm">
             <span className="text-neutral-300">탐색</span>
@@ -210,7 +210,7 @@ function ControllerInner() {
               value={Math.min(seekPos, duration)}
               onChange={(e) => setSeekPos(Number(e.target.value))}
               onPointerUp={() => void actions.seekTo(seekPos)}
-              className="w-full accent-emerald-500"
+              className="range-touch w-full accent-emerald-500"
             />
           )}
         </div>
@@ -226,7 +226,7 @@ function ControllerInner() {
             value={vol}
             onChange={(e) => setVol(Number(e.target.value))}
             onPointerUp={() => void actions.setVolume(vol)}
-            className="w-full accent-emerald-500"
+            className="range-touch w-full accent-emerald-500"
           />
         </div>
         <button
