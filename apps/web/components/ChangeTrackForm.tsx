@@ -55,10 +55,13 @@ export function ChangeTrackForm({
         className="rounded-lg bg-neutral-800 px-3 py-3 text-sm outline-none ring-emerald-500 focus:ring-2"
       />
       {error && <p className="text-sm text-red-400">{error}</p>}
+      {reasonEmpty && !error && (
+        <p className="text-xs text-neutral-400">사유를 입력하면 곡을 변경할 수 있어요</p>
+      )}
       <button
         type="submit"
         disabled={reasonEmpty || pending}
-        className="rounded-lg bg-emerald-500 px-4 py-3 text-sm font-bold text-neutral-950 transition disabled:opacity-40"
+        className="min-h-[44px] rounded-lg bg-emerald-500 px-4 py-3 text-sm font-bold text-neutral-950 transition disabled:bg-neutral-700 disabled:text-neutral-400"
       >
         {pending ? '변경 중…' : '곡 변경'}
       </button>

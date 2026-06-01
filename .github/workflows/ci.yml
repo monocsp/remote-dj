@@ -16,6 +16,11 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - name: Verify protocol contract is committed (no drift)
+        run: |
+          npm run contract:export
+          git diff --exit-code qa/contract.json \
+            || (echo "::error::qa/contract.json is stale — run 'npm run contract:export' and commit it." && exit 1)
       - name: Typecheck
         run: npm run typecheck
       - name: Biome (format + lint)

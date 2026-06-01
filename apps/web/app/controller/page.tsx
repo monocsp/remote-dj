@@ -96,10 +96,10 @@ function ControllerInner() {
         </span>
       </header>
 
-      {/* now-playing card */}
-      <section className="rounded-xl bg-neutral-900 p-4">
-        <p className="text-xs uppercase tracking-wide text-neutral-400">현재 곡</p>
-        <p className="mt-1 text-lg font-semibold">
+      {/* now-playing card — primary info, visually elevated */}
+      <section className="rounded-xl bg-neutral-900 p-4 ring-1 ring-emerald-500/30">
+        <p className="text-xs uppercase tracking-wide text-emerald-400/80">현재 곡</p>
+        <p className="mt-1 text-xl font-bold leading-snug">
           {track?.title ?? (track ? '(제목 없음)' : '재생 중인 곡 없음')}
         </p>
         {track?.url && (
