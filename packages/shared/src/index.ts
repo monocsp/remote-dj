@@ -36,7 +36,9 @@ export interface RoomState {
   updatedAt: number; // epoch ms
   stateVersion: number; // monotonic counter, bumped on every patch; lets clients detect/resync missed updates
   // Latest player-reported playback position; null until the first progress report.
-  progress: { currentTime: number; duration: number; ts: number } | null;
+  // `id` is the videoId this position belongs to (lets the Player resume the
+  // matching track and ignore a stale position after a track change).
+  progress: { currentTime: number; duration: number; ts: number; id: string } | null;
   // Latest seek command the Player should apply; null initially.
   lastSeek: { seconds: number; ts: number } | null;
   // Latest player-reported playback error; null when none / cleared on a new track.

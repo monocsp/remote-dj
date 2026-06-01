@@ -460,15 +460,19 @@ def test_SEEK_06_progress_updates_state_no_log(make_client):
     room = room_code()
     controller.join(room)
     player.join(room, role="player")
+    # Set a current track so progress is stamped with its id.
+    assert controller.call(CHANGE_TRACK, {"url": VALID_URL, "reason": "곡"})["ok"] is True
+    player.wait_for_state(lambda s: (s.get("currentTrack") or {}).get("id") == VALID_ID)
     controller.states.clear()
     controller.activities.clear()
     ack = player.call(PROGRESS, {"currentTime": 12, "duration": 200})
     assert ack["ok"] is True
-    controller.wait_event(3.0)
-    st = controller.last_state()
+    st = controller.wait_for_state(lambda s: (s.get("progress") or {}).get("currentTime") == 12)
     assert st is not None
     assert st["progress"]["currentTime"] == 12
     assert st["progress"]["duration"] == 200
+    # The server stamps the progress with the current track id.
+    assert st["progress"]["id"] == VALID_ID
     # High-frequency reports are NOT logged.
     assert all(a["type"] != "seek" for a in controller.activities)
     assert controller.activities == []

@@ -8,6 +8,7 @@ import {
   useIsPlaying,
   useLastError,
   useLastSeek,
+  useProgress,
   useTrackGain,
   useVolume,
 } from '@/lib/roomStore';
@@ -19,7 +20,9 @@ import { Suspense, useEffect, useRef, useState } from 'react';
 
 // Minimal typings for the YouTube IFrame Player API (loaded at runtime).
 interface YTPlayer {
-  loadVideoById(id: string): void;
+  // Accepts either a bare id or the object form, which supports a start offset
+  // (startSeconds) used to RESUME a track from its last known position.
+  loadVideoById(id: string | { videoId: string; startSeconds?: number }): void;
   playVideo(): void;
   pauseVideo(): void;
   setVolume(volume: number): void;
@@ -91,6 +94,7 @@ function PlayerInner() {
   const stateVolume = useVolume();
   const trackGain = useTrackGain();
   const lastSeek = useLastSeek();
+  const progress = useProgress();
 
   // Latest local YouTube playback error code (null = no current error).
   const [errorCode, setErrorCode] = useState<number | null>(null);
@@ -102,6 +106,12 @@ function PlayerInner() {
   const endedRef = useRef(false);
   // Last applied seek timestamp — so we only seek when the server pushes a new one.
   const lastSeekTsRef = useRef<number | null>(null);
+  // Latest progress, mirrored into a ref so the trackId load effect can read it
+  // to RESUME without re-running on every progress tick.
+  const progressRef = useRef(progress);
+  useEffect(() => {
+    progressRef.current = progress;
+  }, [progress]);
 
   // Inject the IFrame API script once and build the player.
   useEffect(() => {
@@ -164,7 +174,17 @@ function PlayerInner() {
   useEffect(() => {
     if (!playerRef.current || !readyRef.current || !trackId) return;
     endedRef.current = false;
-    playerRef.current.loadVideoById(trackId);
+    // RESUME PLAYBACK: if the latest known position belongs to THIS track and is
+    // past a small threshold, (re)load from that offset — e.g. after a Player
+    // reconnect / server restart. On a fresh changeTrack to a NEW id the
+    // progress.id won't match (it still holds the previous track), so this never
+    // accidentally rewinds an intentional track change.
+    const p = progressRef.current;
+    if (p && p.id === trackId && p.currentTime > 5) {
+      playerRef.current.loadVideoById({ videoId: trackId, startSeconds: p.currentTime });
+    } else {
+      playerRef.current.loadVideoById(trackId);
+    }
   }, [trackId]);
 
   useEffect(() => {

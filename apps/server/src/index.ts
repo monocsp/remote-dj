@@ -696,8 +696,12 @@ export function createServer(
       }
 
       // High-frequency report: update state but DO NOT log an activity entry
-      // (would spam the log; Player throttles to ~2s).
-      await store.patchState(room, { progress: { currentTime, duration, ts: Date.now() } });
+      // (would spam the log; Player throttles to ~2s). Stamp the server's view
+      // of the current track id so the Player can resume the matching track and
+      // ignore a stale position after a track change.
+      const rec = await store.getOrCreate(room);
+      const id = rec.state.currentTrack?.id ?? '';
+      await store.patchState(room, { progress: { currentTime, duration, ts: Date.now(), id } });
       ack({ ok: true });
       await broadcastState(room);
     });

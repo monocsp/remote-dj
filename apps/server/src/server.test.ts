@@ -441,6 +441,15 @@ describe('remote-dj server', () => {
     await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
     await player.emitWithAck(C2S.Join, { roomCode: room, role: 'player' });
 
+    // Set a current track first so progress can be stamped with its id.
+    const hasTrack = waitFor<RoomState>(
+      player,
+      S2C.State,
+      (s) => s.currentTrack?.id === 'dQw4w9WgXcQ',
+    );
+    await controller.emitWithAck(C2S.ChangeTrack, { url: VALID_URL, reason: 'X' });
+    await hasTrack;
+
     // Progress must NOT produce an activity entry.
     let sawActivity = false;
     controller.on(S2C.Activity, () => {
@@ -459,6 +468,8 @@ describe('remote-dj server', () => {
     const cs = await controllerState;
     expect(cs.progress?.currentTime).toBe(12);
     expect(cs.progress?.duration).toBe(200);
+    // The server stamps the progress with the current track's id.
+    expect(cs.progress?.id).toBe('dQw4w9WgXcQ');
     expect(sawActivity).toBe(false);
   });
 
