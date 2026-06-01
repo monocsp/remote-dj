@@ -9,6 +9,7 @@ import {
   type RoomState,
   S2C,
   type Track,
+  type WeeklySchedule,
 } from '@remote-dj/shared';
 import { type Socket, io } from 'socket.io-client';
 import { useStore } from 'zustand';
@@ -154,6 +155,10 @@ export const actions = {
     if (!socket) return Promise.resolve(DISCONNECTED_ACK);
     return socket.emitWithAck(C2S.SetShuffle, { shuffle, reason });
   },
+  setSchedule(schedule: WeeklySchedule | null, reason?: string): Promise<Ack> {
+    if (!socket) return Promise.resolve(DISCONNECTED_ACK);
+    return socket.emitWithAck(C2S.SetSchedule, { schedule, reason });
+  },
 } as const;
 
 // ── Fine-grained selector hooks ──────────────────────────────────────────────
@@ -171,6 +176,7 @@ export const useTrackGain = () => useStore(store, (s) => s.state?.trackGain ?? E
 // Returns the stored nullable object reference directly — stable until the
 // server pushes a new RoomState — so it's safe for useSyncExternalStore.
 export const useSettings = () => useStore(store, (s) => s.state?.settings ?? null);
+export const useSchedule = () => useStore(store, (s) => s.state?.schedule ?? null);
 export const useProgress = () => useStore(store, (s) => s.state?.progress ?? null);
 export const useLastSeek = () => useStore(store, (s) => s.state?.lastSeek ?? null);
 export const usePlaybackError = () => useStore(store, (s) => s.state?.playbackError ?? null);
