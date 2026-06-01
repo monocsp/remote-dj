@@ -10,6 +10,7 @@ from __future__ import annotations
 import random
 import string
 import threading
+import time
 
 import pytest
 import socketio
@@ -83,6 +84,24 @@ class Client:
 
     def last_state(self) -> dict | None:
         return self.states[-1] if self.states else None
+
+    def wait_for_state(self, predicate, timeout: float = 3.0) -> dict | None:
+        """Block until a received `state` satisfies `predicate` (or timeout).
+
+        Deterministic across the activity-before-state emit order: the server
+        emits the `activity` event before the `state` broadcast, so a plain
+        `wait_event()` can wake on the activity and read a stale/empty state.
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            for s in list(self.states):
+                if predicate(s):
+                    return s
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            self._got_event.clear()
+            self._got_event.wait(remaining)
 
     def close(self) -> None:
         try:
@@ -459,8 +478,7 @@ def test_SET_01_update_settings_broadcasts(make_client):
     observer.activities.clear()
     ack = controller.call(UPDATE_SETTINGS, {"settings": {"allowAnonymous": False}})
     assert ack["ok"] is True
-    observer.wait_event(3.0)
-    st = observer.last_state()
+    st = observer.wait_for_state(lambda s: s.get("settings", {}).get("allowAnonymous") is False)
     assert st is not None
     assert st["settings"]["allowAnonymous"] is False
     assert any(a["type"] == "settings" for a in observer.activities)
