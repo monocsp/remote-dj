@@ -210,6 +210,7 @@ function ControllerInner() {
               value={Math.min(seekPos, duration)}
               onChange={(e) => setSeekPos(Number(e.target.value))}
               onPointerUp={() => void actions.seekTo(seekPos)}
+              onKeyUp={() => void actions.seekTo(seekPos)}
               className="range-touch w-full accent-emerald-500"
             />
           )}
@@ -226,6 +227,7 @@ function ControllerInner() {
             value={vol}
             onChange={(e) => setVol(Number(e.target.value))}
             onPointerUp={() => void actions.setVolume(vol)}
+            onKeyUp={() => void actions.setVolume(vol)}
             className="range-touch w-full accent-emerald-500"
           />
         </div>
