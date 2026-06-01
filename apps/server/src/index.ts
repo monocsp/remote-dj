@@ -522,10 +522,13 @@ export function createServer(
       io.to(roomCode).emit(S2C.Activity, entry);
     }
 
-    /** Guard: only controllers may emit control events. */
-    function requireController(ack: AckFn): string | null {
-      if (data.role !== 'controller') {
-        ack({ ok: false, error: 'controllers only' });
+    /**
+     * Guard: any room MEMBER (controller OR player) may emit guest-allowed
+     * control events (changeTrack/enqueueTrack/setVolume/togglePlay/setTrackGain).
+     */
+    function requireMember(ack: AckFn): string | null {
+      if (data.role !== 'controller' && data.role !== 'player') {
+        ack({ ok: false, error: 'not in a room' });
         return null;
       }
       if (!data.roomCode) {
@@ -549,13 +552,13 @@ export function createServer(
     }
 
     /**
-     * Anonymity gate for CONTENT actions (changeTrack/enqueueTrack/nextTrack).
+     * Anonymity gate for CONTROLLER content actions (changeTrack/enqueueTrack).
      * When a room has settings.allowAnonymous === false and this socket has no
      * nickname, ack { ok:false, error:'nickname required' } and return true.
-     * Applied AFTER requireController so authorization is checked first. NOT
-     * applied to setVolume/togglePlay/seekTo/updateSettings/trackEnded/progress
-     * — that keeps low-stakes controls open and (critically) updateSettings
-     * editable so the room can never lock itself out.
+     * Applied ONLY to controllers (guests) — the player is the MAIN and is never
+     * gated. NOT applied to setVolume/togglePlay/setTrackGain — that keeps
+     * low-stakes controls open and (critically) updateSettings is player-only
+     * so the room can never lock itself out.
      */
     async function anonymityBlocked(room: string, ack: AckFn): Promise<boolean> {
       const record = await store.getOrCreate(room);
@@ -636,9 +639,9 @@ export function createServer(
     });
 
     socket.on(C2S.ChangeTrack, async (payload: ChangeTrackPayload, ack: AckFn) => {
-      const room = requireController(ack);
+      const room = requireMember(ack);
       if (!room) return;
-      if (await anonymityBlocked(room, ack)) return;
+      if (data.role === 'controller' && (await anonymityBlocked(room, ack))) return;
       const { url, reason, title } = payload ?? ({} as ChangeTrackPayload);
 
       if (
@@ -689,7 +692,7 @@ export function createServer(
     });
 
     socket.on(C2S.SetVolume, async (payload: SetVolumePayload, ack: AckFn) => {
-      const room = requireController(ack);
+      const room = requireMember(ack);
       if (!room) return;
       const { volume, reason } = payload ?? ({} as SetVolumePayload);
       if (!withinLimit(reason, LIMITS.reason)) {
@@ -705,7 +708,7 @@ export function createServer(
     });
 
     socket.on(C2S.TogglePlay, async (payload: TogglePlayPayload, ack: AckFn) => {
-      const room = requireController(ack);
+      const room = requireMember(ack);
       if (!room) return;
       const { isPlaying, reason } = payload ?? ({} as TogglePlayPayload);
       if (!withinLimit(reason, LIMITS.reason)) {
@@ -720,7 +723,7 @@ export function createServer(
     });
 
     socket.on(C2S.UpdateSettings, async (payload: UpdateSettingsPayload, ack: AckFn) => {
-      const room = requireController(ack);
+      const room = requirePlayer(ack);
       if (!room) return;
       const { settings, reason } = payload ?? ({} as UpdateSettingsPayload);
       if (!withinLimit(reason, LIMITS.reason)) {
@@ -737,9 +740,9 @@ export function createServer(
     });
 
     socket.on(C2S.EnqueueTrack, async (payload: EnqueueTrackPayload, ack: AckFn) => {
-      const room = requireController(ack);
+      const room = requireMember(ack);
       if (!room) return;
-      if (await anonymityBlocked(room, ack)) return;
+      if (data.role === 'controller' && (await anonymityBlocked(room, ack))) return;
       const { url, reason, title } = payload ?? ({} as EnqueueTrackPayload);
 
       if (
@@ -801,7 +804,7 @@ export function createServer(
     });
 
     socket.on(C2S.RemoveQueued, async (payload: RemoveQueuedPayload, ack: AckFn) => {
-      const room = requireController(ack);
+      const room = requirePlayer(ack);
       if (!room) return;
       const { index, reason } = payload ?? ({} as RemoveQueuedPayload);
       if (!withinLimit(reason, LIMITS.reason)) {
@@ -824,22 +827,9 @@ export function createServer(
     });
 
     socket.on(C2S.NextTrack, async (payload: NextTrackPayload, ack: AckFn) => {
-      // The Player may press "다음 곡" too. A player uses its joined room and
-      // skips the controller/anonymity checks; everyone else goes through the
-      // controller + anonymity gates.
-      let room: string;
-      if (data.role === 'player') {
-        if (!data.roomCode) {
-          ack({ ok: false, error: 'not in a room' });
-          return;
-        }
-        room = data.roomCode;
-      } else {
-        const r = requireController(ack);
-        if (!r) return;
-        if (await anonymityBlocked(r, ack)) return;
-        room = r;
-      }
+      // "다음 곡" is a MAIN action: player-only (controllers are limited guests).
+      const room = requirePlayer(ack);
+      if (!room) return;
       const { reason } = payload ?? ({} as NextTrackPayload);
       if (!withinLimit(reason, LIMITS.reason)) {
         ack({ ok: false, error: 'input too long' });
@@ -879,7 +869,7 @@ export function createServer(
     });
 
     socket.on(C2S.SeekTo, async (payload: SeekToPayload, ack: AckFn) => {
-      const room = requireController(ack);
+      const room = requirePlayer(ack);
       if (!room) return;
       const { seconds, reason } = payload ?? ({} as SeekToPayload);
       if (!withinLimit(reason, LIMITS.reason)) {
@@ -956,7 +946,7 @@ export function createServer(
     });
 
     socket.on(C2S.SetTrackGain, async (payload: SetTrackGainPayload, ack: AckFn) => {
-      const room = requireController(ack);
+      const room = requireMember(ack);
       if (!room) return;
       const { videoId, gain, reason } = payload ?? ({} as SetTrackGainPayload);
       if (!withinLimit(reason, LIMITS.reason)) {
@@ -979,7 +969,7 @@ export function createServer(
     });
 
     socket.on(C2S.SetRepeat, async (payload: SetRepeatPayload, ack: AckFn) => {
-      const room = requireController(ack);
+      const room = requirePlayer(ack);
       if (!room) return;
       const { mode, reason } = payload ?? ({} as SetRepeatPayload);
       if (!withinLimit(reason, LIMITS.reason)) {
@@ -998,7 +988,7 @@ export function createServer(
     });
 
     socket.on(C2S.SetShuffle, async (payload: SetShufflePayload, ack: AckFn) => {
-      const room = requireController(ack);
+      const room = requirePlayer(ack);
       if (!room) return;
       const { shuffle, reason } = payload ?? ({} as SetShufflePayload);
       if (!withinLimit(reason, LIMITS.reason)) {

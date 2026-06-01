@@ -130,16 +130,22 @@ describe('remote-dj server', () => {
     expect(state.volume).toBe(100);
   });
 
-  it('rejects control events from a player', async () => {
+  it('allows guest control events from a player (changeTrack/setVolume/togglePlay)', async () => {
     const room = 'ROOM04';
     const player = connect();
     await player.emitWithAck(C2S.Join, { roomCode: room, role: 'player' });
 
-    const ack = (await player.emitWithAck(C2S.ChangeTrack, {
+    const changeAck = (await player.emitWithAck(C2S.ChangeTrack, {
       url: VALID_URL,
       reason: 'i want this',
     })) as Ack;
-    expect(ack.ok).toBe(false);
+    expect(changeAck.ok).toBe(true);
+
+    const volAck = (await player.emitWithAck(C2S.SetVolume, { volume: 40 })) as Ack;
+    expect(volAck.ok).toBe(true);
+
+    const toggleAck = (await player.emitWithAck(C2S.TogglePlay, { isPlaying: false })) as Ack;
+    expect(toggleAck.ok).toBe(true);
   });
 
   it('isolates a socket that switched rooms from its old room broadcasts', async () => {
@@ -255,12 +261,13 @@ describe('remote-dj server', () => {
   it('propagates lastSeek to OTHER room members (separate observer)', async () => {
     const room = 'ROOMSK';
     const observer = connect();
-    const controller = connect();
-    await observer.emitWithAck(C2S.Join, { roomCode: room, role: 'player' });
-    await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+    const player = connect();
+    await observer.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+    await player.emitWithAck(C2S.Join, { roomCode: room, role: 'player' });
 
     const obsState = waitFor<RoomState>(observer, S2C.State, (s) => s.lastSeek?.seconds === 37);
-    const ack = (await controller.emitWithAck(C2S.SeekTo, { seconds: 37 })) as Ack;
+    // seekTo is a MAIN action: player-only.
+    const ack = (await player.emitWithAck(C2S.SeekTo, { seconds: 37 })) as Ack;
     expect(ack.ok).toBe(true);
 
     const s = await obsState;
@@ -350,33 +357,32 @@ describe('remote-dj server', () => {
     expect(pa.type).toBe('enqueue');
   });
 
-  it('nextTrack advances currentTrack to the queued item and shrinks the queue', async () => {
+  it('nextTrack (player) advances currentTrack to the queued item and shrinks the queue', async () => {
     const room = 'QUEUE2';
     const SECOND_URL = 'https://youtu.be/9bZkp7q19f0';
     const controller = connect();
+    const player = connect();
     await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+    await player.emitWithAck(C2S.Join, { roomCode: room, role: 'player' });
 
     // A becomes current (auto-start); B then queues behind it. Register each
     // predicate wait BEFORE its triggering emit so a fast broadcast isn't missed.
-    const onA = waitFor<RoomState>(
-      controller,
-      S2C.State,
-      (s) => s.currentTrack?.id === 'dQw4w9WgXcQ',
-    );
+    const onA = waitFor<RoomState>(player, S2C.State, (s) => s.currentTrack?.id === 'dQw4w9WgXcQ');
     await controller.emitWithAck(C2S.EnqueueTrack, { url: VALID_URL });
     await onA;
-    const queued = waitFor<RoomState>(controller, S2C.State, (s) =>
+    const queued = waitFor<RoomState>(player, S2C.State, (s) =>
       s.queue.some((t) => t.id === '9bZkp7q19f0'),
     );
     await controller.emitWithAck(C2S.EnqueueTrack, { url: SECOND_URL });
     await queued;
 
     const advanced = waitFor<RoomState>(
-      controller,
+      player,
       S2C.State,
       (s) => s.currentTrack?.id === '9bZkp7q19f0',
     );
-    const ack = (await controller.emitWithAck(C2S.NextTrack, {})) as Ack;
+    // nextTrack is a MAIN action: player-only.
+    const ack = (await player.emitWithAck(C2S.NextTrack, {})) as Ack;
     expect(ack.ok).toBe(true);
 
     const state = await advanced;
@@ -385,21 +391,37 @@ describe('remote-dj server', () => {
     expect(state.isPlaying).toBe(true);
   });
 
-  it('nextTrack on an empty queue is a no-op ok', async () => {
-    const room = 'QUEUE3';
+  it('nextTrack from a controller is rejected (player only)', async () => {
+    const room = 'QUEUE2C';
     const controller = connect();
     await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
 
     const ack = (await controller.emitWithAck(C2S.NextTrack, {})) as Ack;
+    expect(ack.ok).toBe(false);
+    expect(ack.error).toBe('player only');
+  });
+
+  it('nextTrack on an empty queue is a no-op ok (player)', async () => {
+    const room = 'QUEUE3';
+    const player = connect();
+    await player.emitWithAck(C2S.Join, { roomCode: room, role: 'player' });
+
+    const ack = (await player.emitWithAck(C2S.NextTrack, {})) as Ack;
     expect(ack.ok).toBe(true);
   });
 
-  it('removeQueued with an out-of-range index acks false', async () => {
+  it('removeQueued (player) with an out-of-range index acks false; controller rejected', async () => {
     const room = 'QUEUE4';
     const controller = connect();
+    const player = connect();
     await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+    await player.emitWithAck(C2S.Join, { roomCode: room, role: 'player' });
 
-    const ack = (await controller.emitWithAck(C2S.RemoveQueued, { index: 5 })) as Ack;
+    const rejected = (await controller.emitWithAck(C2S.RemoveQueued, { index: 5 })) as Ack;
+    expect(rejected.ok).toBe(false);
+    expect(rejected.error).toBe('player only');
+
+    const ack = (await player.emitWithAck(C2S.RemoveQueued, { index: 5 })) as Ack;
     expect(ack.ok).toBe(false);
     expect(ack.error).toBe('invalid index');
   });
@@ -436,17 +458,26 @@ describe('remote-dj server', () => {
     expect(state.queue.length).toBe(0);
   });
 
-  it('rejects enqueue from a player (controller-only); nextTrack is allowed', async () => {
+  it('allows enqueue + nextTrack from a player (guest event + main event)', async () => {
     const room = 'QUEUE6';
     const player = connect();
     await player.emitWithAck(C2S.Join, { roomCode: room, role: 'player' });
 
     const enqAck = (await player.emitWithAck(C2S.EnqueueTrack, { url: VALID_URL })) as Ack;
-    expect(enqAck.ok).toBe(false);
+    expect(enqAck.ok).toBe(true);
 
-    // nextTrack is now allowed for the Player too (empty queue → ok no-op).
+    // nextTrack is also allowed for the Player (main action).
     const nextAck = (await player.emitWithAck(C2S.NextTrack, {})) as Ack;
     expect(nextAck.ok).toBe(true);
+  });
+
+  it('allows enqueue from a controller (guest event)', async () => {
+    const room = 'QUEUE6C';
+    const controller = connect();
+    await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+
+    const enqAck = (await controller.emitWithAck(C2S.EnqueueTrack, { url: VALID_URL })) as Ack;
+    expect(enqAck.ok).toBe(true);
   });
 
   it('rejects trackEnded from a controller (player-only)', async () => {
@@ -459,7 +490,7 @@ describe('remote-dj server', () => {
     expect(ack.error).toBe('player only');
   });
 
-  it('seekTo by a controller broadcasts lastSeek and logs a seek activity', async () => {
+  it('seekTo by a player broadcasts lastSeek and logs a seek activity', async () => {
     const room = 'SEEK1';
     const controller = connect();
     const player = connect();
@@ -468,35 +499,37 @@ describe('remote-dj server', () => {
 
     const hasSeek = (s: RoomState) => s.lastSeek?.seconds === 42;
     const isSeek = (a: ActivityEntry) => a.type === 'seek';
-    const playerState = waitFor<RoomState>(player, S2C.State, hasSeek);
-    const playerActivity = waitFor<ActivityEntry>(player, S2C.Activity, isSeek);
+    const controllerState = waitFor<RoomState>(controller, S2C.State, hasSeek);
+    const controllerActivity = waitFor<ActivityEntry>(controller, S2C.Activity, isSeek);
 
-    const ack = (await controller.emitWithAck(C2S.SeekTo, { seconds: 42 })) as Ack;
+    // seekTo is a MAIN action: player-only.
+    const ack = (await player.emitWithAck(C2S.SeekTo, { seconds: 42 })) as Ack;
     expect(ack.ok).toBe(true);
 
-    const [ps, pa] = await Promise.all([playerState, playerActivity]);
-    expect(ps.lastSeek?.seconds).toBe(42);
-    expect(pa.type).toBe('seek');
-    expect((pa.detail as { seconds: number }).seconds).toBe(42);
+    const [cs, ca] = await Promise.all([controllerState, controllerActivity]);
+    expect(cs.lastSeek?.seconds).toBe(42);
+    expect(ca.type).toBe('seek');
+    expect((ca.detail as { seconds: number }).seconds).toBe(42);
   });
 
-  it('rejects seekTo with negative seconds', async () => {
+  it('rejects seekTo with negative seconds (player)', async () => {
     const room = 'SEEK2';
-    const controller = connect();
-    await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+    const player = connect();
+    await player.emitWithAck(C2S.Join, { roomCode: room, role: 'player' });
 
-    const ack = (await controller.emitWithAck(C2S.SeekTo, { seconds: -5 })) as Ack;
+    const ack = (await player.emitWithAck(C2S.SeekTo, { seconds: -5 })) as Ack;
     expect(ack.ok).toBe(false);
     expect(ack.error).toBe('invalid seconds');
   });
 
-  it('rejects seekTo from a player (controller-only)', async () => {
+  it('rejects seekTo from a controller (player only)', async () => {
     const room = 'SEEK3';
-    const player = connect();
-    await player.emitWithAck(C2S.Join, { roomCode: room, role: 'player' });
+    const controller = connect();
+    await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
 
-    const ack = (await player.emitWithAck(C2S.SeekTo, { seconds: 10 })) as Ack;
+    const ack = (await controller.emitWithAck(C2S.SeekTo, { seconds: 10 })) as Ack;
     expect(ack.ok).toBe(false);
+    expect(ack.error).toBe('player only');
   });
 
   it('progress from a player updates state.progress and logs no activity', async () => {
@@ -553,19 +586,20 @@ describe('remote-dj server', () => {
 
   // ── SET-xx: settings / allowAnonymous enforcement ──────────────────────────
 
-  it('SET-01 updateSettings broadcasts new settings + logs a settings activity', async () => {
+  it('SET-01 updateSettings (player) broadcasts new settings + logs a settings activity', async () => {
     const room = 'SET01';
-    const controller = connect();
+    const player = connect();
     const observer = connect();
-    await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
-    await observer.emitWithAck(C2S.Join, { roomCode: room, role: 'player' });
+    await player.emitWithAck(C2S.Join, { roomCode: room, role: 'player' });
+    await observer.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
 
     const settingsOff = (s: RoomState) => s.settings.allowAnonymous === false;
     const isSettings = (a: ActivityEntry) => a.type === 'settings';
     const obsState = waitFor<RoomState>(observer, S2C.State, settingsOff);
     const obsActivity = waitFor<ActivityEntry>(observer, S2C.Activity, isSettings);
 
-    const ack = (await controller.emitWithAck(C2S.UpdateSettings, {
+    // updateSettings is a MAIN action: player-only.
+    const ack = (await player.emitWithAck(C2S.UpdateSettings, {
       settings: { allowAnonymous: false },
     })) as Ack;
     expect(ack.ok).toBe(true);
@@ -575,12 +609,26 @@ describe('remote-dj server', () => {
     expect(oa.type).toBe('settings');
   });
 
-  it('SET-02 rejects an anonymous controller changeTrack when allowAnonymous=false', async () => {
-    const room = 'SET02';
-    const controller = connect(); // joins WITHOUT a nickname → anonymous
+  it('SET-01b rejects updateSettings from a controller (player only)', async () => {
+    const room = 'SET01B';
+    const controller = connect();
     await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
 
-    const settingsAck = (await controller.emitWithAck(C2S.UpdateSettings, {
+    const ack = (await controller.emitWithAck(C2S.UpdateSettings, {
+      settings: { allowAnonymous: false },
+    })) as Ack;
+    expect(ack.ok).toBe(false);
+    expect(ack.error).toBe('player only');
+  });
+
+  it('SET-02 rejects an anonymous controller changeTrack when allowAnonymous=false', async () => {
+    const room = 'SET02';
+    const player = connect(); // player flips the setting (updateSettings is main-only)
+    const controller = connect(); // joins WITHOUT a nickname → anonymous
+    await player.emitWithAck(C2S.Join, { roomCode: room, role: 'player' });
+    await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+
+    const settingsAck = (await player.emitWithAck(C2S.UpdateSettings, {
       settings: { allowAnonymous: false },
     })) as Ack;
     expect(settingsAck.ok).toBe(true);
@@ -593,16 +641,32 @@ describe('remote-dj server', () => {
     expect(ack.error).toBe('nickname required');
   });
 
+  it('SET-02b an anonymous PLAYER changeTrack is NOT gated when allowAnonymous=false (player never gated)', async () => {
+    const room = 'SET02P';
+    const player = connect(); // anonymous player
+    await player.emitWithAck(C2S.Join, { roomCode: room, role: 'player' });
+
+    const settingsAck = (await player.emitWithAck(C2S.UpdateSettings, {
+      settings: { allowAnonymous: false },
+    })) as Ack;
+    expect(settingsAck.ok).toBe(true);
+
+    const ack = (await player.emitWithAck(C2S.ChangeTrack, {
+      url: VALID_URL,
+      reason: 'main is never gated',
+    })) as Ack;
+    expect(ack.ok).toBe(true);
+  });
+
   it('SET-03 allows a controller WITH a nickname to changeTrack when allowAnonymous=false', async () => {
     const room = 'SET03';
+    const player = connect();
     const named = connect();
-    const anon = connect();
-    // A named controller flips the setting; a different anon controller can't,
-    // but the named one can still change tracks.
+    // A player flips the setting; a named controller can still change tracks.
+    await player.emitWithAck(C2S.Join, { roomCode: room, role: 'player' });
     await named.emitWithAck(C2S.Join, { roomCode: room, role: 'controller', nickname: 'dj' });
-    await anon.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
 
-    const settingsAck = (await named.emitWithAck(C2S.UpdateSettings, {
+    const settingsAck = (await player.emitWithAck(C2S.UpdateSettings, {
       settings: { allowAnonymous: false },
     })) as Ack;
     expect(settingsAck.ok).toBe(true);
@@ -622,10 +686,12 @@ describe('remote-dj server', () => {
 
   it('SET-04 setVolume from an anonymous controller still works when allowAnonymous=false (not gated)', async () => {
     const room = 'SET04';
+    const player = connect();
     const controller = connect(); // anonymous
+    await player.emitWithAck(C2S.Join, { roomCode: room, role: 'player' });
     await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
 
-    const settingsAck = (await controller.emitWithAck(C2S.UpdateSettings, {
+    const settingsAck = (await player.emitWithAck(C2S.UpdateSettings, {
       settings: { allowAnonymous: false },
     })) as Ack;
     expect(settingsAck.ok).toBe(true);
@@ -839,36 +905,33 @@ describe('remote-dj server', () => {
     expect(log.some((e) => e.type === 'track_change')).toBe(true);
   });
 
-  it('QUEUE-13 removeQueued at index 0 drops the head and keeps the rest', async () => {
+  it('QUEUE-13 removeQueued (player) at index 0 drops the head and keeps the rest', async () => {
     const room = 'QUEUE13';
     const SECOND_URL = 'https://youtu.be/9bZkp7q19f0';
     const THIRD_URL = 'https://youtu.be/3JZ_D3ELwOQ';
-    const controller = connect();
-    await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+    const player = connect();
+    await player.emitWithAck(C2S.Join, { roomCode: room, role: 'player' });
 
     // A becomes current (auto-start via changeTrack); B and C then queue → [B, C].
-    const hasA = waitFor<RoomState>(
-      controller,
-      S2C.State,
-      (s) => s.currentTrack?.id === 'dQw4w9WgXcQ',
-    );
-    await controller.emitWithAck(C2S.ChangeTrack, { url: VALID_URL, reason: 'A' });
+    const hasA = waitFor<RoomState>(player, S2C.State, (s) => s.currentTrack?.id === 'dQw4w9WgXcQ');
+    await player.emitWithAck(C2S.ChangeTrack, { url: VALID_URL, reason: 'A' });
     await hasA;
     const built = waitFor<RoomState>(
-      controller,
+      player,
       S2C.State,
       (s) => s.queue.length === 2 && s.queue[1]?.id === '3JZ_D3ELwOQ',
     );
-    await controller.emitWithAck(C2S.EnqueueTrack, { url: SECOND_URL });
-    await controller.emitWithAck(C2S.EnqueueTrack, { url: THIRD_URL });
+    await player.emitWithAck(C2S.EnqueueTrack, { url: SECOND_URL });
+    await player.emitWithAck(C2S.EnqueueTrack, { url: THIRD_URL });
     await built;
 
     const shrunk = waitFor<RoomState>(
-      controller,
+      player,
       S2C.State,
       (s) => s.queue.length === 1 && s.queue[0]?.id === '3JZ_D3ELwOQ',
     );
-    const ack = (await controller.emitWithAck(C2S.RemoveQueued, { index: 0 })) as Ack;
+    // removeQueued is a MAIN action: player-only.
+    const ack = (await player.emitWithAck(C2S.RemoveQueued, { index: 0 })) as Ack;
     expect(ack.ok).toBe(true);
 
     const s = await shrunk;
@@ -1034,6 +1097,20 @@ describe('remote-dj server', () => {
     expect((await low).trackGain.bbbbbbbbbbb).toBe(0.2);
   });
 
+  it('GAIN-01b setTrackGain is allowed from a player too (guest event, both roles)', async () => {
+    const room = 'GAIN01B';
+    const player = connect();
+    await player.emitWithAck(C2S.Join, { roomCode: room, role: 'player' });
+
+    const hasGain = waitFor<RoomState>(player, S2C.State, (s) => s.trackGain.dQw4w9WgXcQ === 0.6);
+    const ack = (await player.emitWithAck(C2S.SetTrackGain, {
+      videoId: 'dQw4w9WgXcQ',
+      gain: 0.6,
+    })) as Ack;
+    expect(ack.ok).toBe(true);
+    expect((await hasGain).trackGain.dQw4w9WgXcQ).toBe(0.6);
+  });
+
   it('GAIN-03 auto-seeds trackGain from a loud YouTube loudnessDb on changeTrack', async () => {
     // Dedicated server: loudness stub reports +6 dB ⇒ factor ≈ 10^(-6/20) ≈ 0.5.
     const local = createServer(
@@ -1079,7 +1156,7 @@ describe('remote-dj server', () => {
   const SECOND_ID = '9bZkp7q19f0';
   const THIRD_URL = 'https://youtu.be/kJQP7kiw5Fk';
 
-  it('MODE-01 setRepeat broadcasts state.repeat and logs a mode activity', async () => {
+  it('MODE-01 setRepeat (player) broadcasts state.repeat and logs a mode activity', async () => {
     const room = 'MODE01';
     const controller = connect();
     const player = connect();
@@ -1088,25 +1165,37 @@ describe('remote-dj server', () => {
 
     const repeatAll = (s: RoomState) => s.repeat === 'all';
     const isMode = (a: ActivityEntry) => a.type === 'mode';
-    const playerState = waitFor<RoomState>(player, S2C.State, repeatAll);
-    const playerActivity = waitFor<ActivityEntry>(player, S2C.Activity, isMode);
+    const controllerState = waitFor<RoomState>(controller, S2C.State, repeatAll);
+    const controllerActivity = waitFor<ActivityEntry>(controller, S2C.Activity, isMode);
 
-    const ack = (await controller.emitWithAck(C2S.SetRepeat, { mode: 'all' })) as Ack;
+    // setRepeat is a MAIN action: player-only.
+    const ack = (await player.emitWithAck(C2S.SetRepeat, { mode: 'all' })) as Ack;
     expect(ack.ok).toBe(true);
 
-    const [ps, pa] = await Promise.all([playerState, playerActivity]);
-    expect(ps.repeat).toBe('all');
-    expect(pa.type).toBe('mode');
-    expect((pa.detail as { repeat: string }).repeat).toBe('all');
+    const [cs, ca] = await Promise.all([controllerState, controllerActivity]);
+    expect(cs.repeat).toBe('all');
+    expect(ca.type).toBe('mode');
+    expect((ca.detail as { repeat: string }).repeat).toBe('all');
   });
 
-  it('MODE-02 setShuffle broadcasts state.shuffle', async () => {
-    const room = 'MODE02';
+  it('MODE-01b rejects setRepeat from a controller (player only)', async () => {
+    const room = 'MODE01B';
     const controller = connect();
     await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
 
-    const shuffleOn = waitFor<RoomState>(controller, S2C.State, (s) => s.shuffle === true);
-    const ack = (await controller.emitWithAck(C2S.SetShuffle, { shuffle: true })) as Ack;
+    const ack = (await controller.emitWithAck(C2S.SetRepeat, { mode: 'all' })) as Ack;
+    expect(ack.ok).toBe(false);
+    expect(ack.error).toBe('player only');
+  });
+
+  it('MODE-02 setShuffle (player) broadcasts state.shuffle', async () => {
+    const room = 'MODE02';
+    const player = connect();
+    await player.emitWithAck(C2S.Join, { roomCode: room, role: 'player' });
+
+    const shuffleOn = waitFor<RoomState>(player, S2C.State, (s) => s.shuffle === true);
+    // setShuffle is a MAIN action: player-only.
+    const ack = (await player.emitWithAck(C2S.SetShuffle, { shuffle: true })) as Ack;
     expect(ack.ok).toBe(true);
 
     const s = await shuffleOn;
@@ -1120,7 +1209,7 @@ describe('remote-dj server', () => {
     await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
     await player.emitWithAck(C2S.Join, { roomCode: room, role: 'player' });
 
-    await controller.emitWithAck(C2S.SetRepeat, { mode: 'one' });
+    await player.emitWithAck(C2S.SetRepeat, { mode: 'one' });
     const hasA = waitFor<RoomState>(player, S2C.State, (s) => s.currentTrack?.id === 'dQw4w9WgXcQ');
     await controller.emitWithAck(C2S.ChangeTrack, { url: VALID_URL, reason: 'A' });
     await hasA;
@@ -1146,7 +1235,7 @@ describe('remote-dj server', () => {
     await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
     await player.emitWithAck(C2S.Join, { roomCode: room, role: 'player' });
 
-    await controller.emitWithAck(C2S.SetRepeat, { mode: 'all' });
+    await player.emitWithAck(C2S.SetRepeat, { mode: 'all' });
     const hasA = waitFor<RoomState>(player, S2C.State, (s) => s.currentTrack?.id === 'dQw4w9WgXcQ');
     await controller.emitWithAck(C2S.ChangeTrack, { url: VALID_URL, reason: 'A' });
     await hasA;
@@ -1205,29 +1294,26 @@ describe('remote-dj server', () => {
 
   it('SHUFFLE picks a random queued track on manual nextTrack', async () => {
     const room = 'SHUF01';
-    const controller = connect();
-    await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+    const player = connect();
+    await player.emitWithAck(C2S.Join, { roomCode: room, role: 'player' });
 
-    await controller.emitWithAck(C2S.SetShuffle, { shuffle: true });
+    // setShuffle + nextTrack are main actions: player-only.
+    await player.emitWithAck(C2S.SetShuffle, { shuffle: true });
     // A becomes current (auto-start); B and C then queue → [B, C].
-    const hasA = waitFor<RoomState>(
-      controller,
-      S2C.State,
-      (s) => s.currentTrack?.id === 'dQw4w9WgXcQ',
-    );
-    await controller.emitWithAck(C2S.ChangeTrack, { url: VALID_URL, reason: 'A' });
+    const hasA = waitFor<RoomState>(player, S2C.State, (s) => s.currentTrack?.id === 'dQw4w9WgXcQ');
+    await player.emitWithAck(C2S.ChangeTrack, { url: VALID_URL, reason: 'A' });
     await hasA;
-    const built = waitFor<RoomState>(controller, S2C.State, (s) => s.queue.length === 2);
-    await controller.emitWithAck(C2S.EnqueueTrack, { url: SECOND_URL });
-    await controller.emitWithAck(C2S.EnqueueTrack, { url: THIRD_URL });
+    const built = waitFor<RoomState>(player, S2C.State, (s) => s.queue.length === 2);
+    await player.emitWithAck(C2S.EnqueueTrack, { url: SECOND_URL });
+    await player.emitWithAck(C2S.EnqueueTrack, { url: THIRD_URL });
     await built;
 
     const advanced = waitFor<RoomState>(
-      controller,
+      player,
       S2C.State,
       (s) => s.currentTrack?.id === SECOND_ID || s.currentTrack?.id === 'kJQP7kiw5Fk',
     );
-    const ack = (await controller.emitWithAck(C2S.NextTrack, {})) as Ack;
+    const ack = (await player.emitWithAck(C2S.NextTrack, {})) as Ack;
     expect(ack.ok).toBe(true);
 
     const s = await advanced;

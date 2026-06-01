@@ -1,6 +1,6 @@
 'use client';
 
-import { ScheduleEditor } from '@/components/ScheduleEditor';
+import { ControlPanel } from '@/components/ControlPanel';
 import {
   actions,
   connectRoom,
@@ -10,8 +10,6 @@ import {
   useLastError,
   useLastSeek,
   useProgress,
-  useQueue,
-  useSchedule,
   useTrackGain,
   useVolume,
 } from '@/lib/roomStore';
@@ -98,8 +96,6 @@ function PlayerInner() {
   const trackGain = useTrackGain();
   const lastSeek = useLastSeek();
   const progress = useProgress();
-  const queue = useQueue();
-  const schedule = useSchedule();
 
   // Latest local YouTube playback error code (null = no current error).
   const [errorCode, setErrorCode] = useState<number | null>(null);
@@ -240,9 +236,9 @@ function PlayerInner() {
   return (
     <main className="mx-auto flex min-h-screen w-full max-w-md flex-col gap-5 px-5 py-8">
       <div className="text-center">
-        <p className="text-sm text-neutral-400">방 코드</p>
+        <p className="text-sm text-neutral-400">방 코드 · 플레이어 (메인)</p>
         <p className="text-5xl font-bold tracking-[0.2em]">{room || '—'}</p>
-        <p className="mt-2 text-sm text-neutral-500">이 코드로 Controller에서 접속</p>
+        <p className="mt-2 text-sm text-neutral-500">이 코드로 리모컨에서 접속</p>
       </div>
 
       <div className="aspect-video w-full overflow-hidden rounded-xl bg-black">
@@ -266,42 +262,7 @@ function PlayerInner() {
         </div>
       )}
 
-      <div className="rounded-xl bg-neutral-900 p-4">
-        <div className="flex items-center justify-between gap-3">
-          <div className="min-w-0">
-            <p className="text-xs uppercase tracking-wide text-neutral-500">현재 곡</p>
-            <p className="mt-1 truncate text-lg font-semibold">
-              {currentTrack?.title ?? (currentTrack ? '(제목 없음)' : '재생 중인 곡 없음')}
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={() => void actions.nextTrack()}
-            disabled={queue.length === 0}
-            className="min-h-[44px] shrink-0 rounded-lg bg-emerald-500 px-4 text-sm font-bold text-neutral-950 transition disabled:opacity-40"
-          >
-            다음 곡 ⏭
-          </button>
-        </div>
-      </div>
-
-      <div className="rounded-xl bg-neutral-900 p-4">
-        <p className="text-xs uppercase tracking-wide text-neutral-500">다음 곡</p>
-        {queue.length === 0 ? (
-          <p className="mt-1 text-base text-neutral-500">다음 곡 없음</p>
-        ) : (
-          <ol className="mt-2 flex flex-col gap-2">
-            {queue.map((track, index) => (
-              <li key={`${track.id}-${index}`} className="flex items-baseline gap-3 text-base">
-                <span className="w-6 shrink-0 text-right text-neutral-500">{index + 1}</span>
-                <span className="font-medium">{track.title ?? '(제목 없음)'}</span>
-              </li>
-            ))}
-          </ol>
-        )}
-      </div>
-
-      <ScheduleEditor schedule={schedule} onSave={actions.setSchedule} />
+      <ControlPanel variant="main" />
 
       <p className="text-center text-sm">
         <span className={connected ? 'text-emerald-400' : 'text-neutral-500'}>

@@ -152,16 +152,20 @@ async function enqueueTrack(page: Page, url: string): Promise<void> {
 const SECOND_URL = 'https://youtu.be/9bZkp7q19f0';
 
 // QUEUE-01 + QUEUE-07: with a track already playing, Controller A enqueues a
-// valid track → it appears in Controller B's queue UI; A clicks 다음 곡 → the
-// formerly-queued track becomes the now-playing track on both controllers.
+// valid track → it appears in Controller B's queue UI; the PLAYER (main) clicks
+// 다음 곡 (a main-only action) → the formerly-queued track becomes the
+// now-playing track on the controllers.
 // NOTE: enqueuing into an IDLE room auto-starts the track (QUEUE-14), so to test
 // QUEUEING we first change the current track, then enqueue B.
 test('QUEUE-01/07 enqueue propagates + 다음 곡 promotes to now-playing', async ({ browser }) => {
   const room = uniqueRoom();
 
+  const playerCtx = await browser.newContext();
+  await mockYouTube(playerCtx);
   const ctxA = await browser.newContext();
   const ctxB = await browser.newContext();
 
+  const player = await openRoom(playerCtx, 'player', room);
   const a = await openRoom(ctxA, 'controller', room, 'A');
   const b = await openRoom(ctxB, 'controller', room, 'B');
 
@@ -177,14 +181,14 @@ test('QUEUE-01/07 enqueue propagates + 다음 곡 promotes to now-playing', asyn
   const bQueue = b.locator('section', { hasText: '대기열' });
   await expect(bQueue.getByText(SECOND_URL)).toBeVisible({ timeout: 15_000 });
 
-  // QUEUE-07: A clicks 다음 곡 → queued head promotes to currentTrack.
-  await a.getByRole('button', { name: '다음 곡' }).click();
+  // QUEUE-07: the PLAYER clicks 다음 곡 (main-only) → queued head promotes.
+  await player.getByRole('button', { name: '다음 곡' }).click();
 
   // Both controllers' now-playing card reflects the formerly-queued track.
   await expect(a.getByRole('link', { name: SECOND_URL })).toBeVisible({ timeout: 15_000 });
   await expect(b.getByRole('link', { name: SECOND_URL })).toBeVisible({ timeout: 15_000 });
 
-  await Promise.all([ctxA.close(), ctxB.close()]);
+  await Promise.all([playerCtx.close(), ctxA.close(), ctxB.close()]);
 });
 
 // PAIR-01/07: pairing happy-path — a controller joining an open room connects
@@ -241,12 +245,12 @@ test('PAIR-06 wrong-password rejection (contract via socket)', async () => {
   expect(wrong.error).toBe('wrong password');
 });
 
-// SEEK-06/01 (web slice): a mocked Player reports progress so the Controller's
-// 탐색 bar appears, and a Controller seek is accepted and logged. The server-side
-// propagation of lastSeek to other clients + the Player applying it are covered
-// reliably by the server observer test (server.test.ts) and the Python harness;
-// here we verify the web UI path (progress → bar → seek → activity).
-test('SEEK-06/01 progress shows seek bar + controller seek is logged', async ({ browser }) => {
+// SEEK-06/01 (web slice): a mocked Player reports progress so the Player's
+// 탐색 bar appears, and a Player seek (main-only) is accepted and logged. The
+// server-side propagation of lastSeek to other clients is covered reliably by
+// the server observer test (server.test.ts) and the Python harness; here we
+// verify the web UI path (progress → bar → seek → activity).
+test('SEEK-06/01 progress shows seek bar + player seek is logged', async ({ browser }) => {
   const room = uniqueRoom();
 
   const playerCtx = await browser.newContext();
@@ -268,37 +272,42 @@ test('SEEK-06/01 progress shows seek bar + controller seek is logged', async ({ 
     )
     .toContain(VALID_ID);
 
-  // SEEK-06: progress propagates → Controller's 탐색 range input appears.
-  const seekSection = a.locator('section', { hasText: '탐색' });
+  // SEEK-06: progress propagates → the Player's (main) 탐색 range input appears.
+  const seekSection = player.locator('section', { hasText: '탐색' });
   const seekRange = seekSection.locator('input[type="range"]').first();
   await expect(seekRange).toBeVisible({ timeout: 20_000 });
 
-  // SEEK-01: a real pointer gesture on the slider issues a seek; the controller's
-  // own Activity Log then shows the seek entry (UI → server path).
+  // SEEK-01: a real pointer gesture on the slider issues a seek (main-only); the
+  // Player's own Activity Log then shows the seek entry (UI → server path).
   await seekRange.click();
-  await expect(a.locator('section', { hasText: 'Activity Log' }).getByText('탐색')).toBeVisible({
+  await expect(
+    player.locator('section', { hasText: 'Activity Log' }).getByText('탐색'),
+  ).toBeVisible({
     timeout: 10_000,
   });
 
   await Promise.all([playerCtx.close(), ctxA.close()]);
 });
 
-// SET-01: Controller A toggles allowAnonymous off → Controller B's settings UI
-// reflects it (checkbox becomes unchecked + the nickname hint appears). Verifies
-// updateSettings broadcasts and the controller settings UI renders state.
-test('SET-01 allowAnonymous toggle syncs to other controller UI', async ({ browser }) => {
+// SET-01: the settings(설정) UI is now a MAIN-only control on the Player. A
+// Player toggles allowAnonymous off → a second Player's settings UI reflects it
+// (checkbox becomes unchecked + the nickname hint appears). Verifies
+// updateSettings broadcasts and the player settings UI renders state.
+test('SET-01 allowAnonymous toggle syncs to other player UI', async ({ browser }) => {
   const room = uniqueRoom();
 
   const ctxA = await browser.newContext();
+  await mockYouTube(ctxA);
   const ctxB = await browser.newContext();
+  await mockYouTube(ctxB);
 
-  const a = await openRoom(ctxA, 'controller', room, 'A');
-  const b = await openRoom(ctxB, 'controller', room, 'B');
+  const a = await openRoom(ctxA, 'player', room);
+  const b = await openRoom(ctxB, 'player', room);
 
   const checkboxA = a.getByRole('checkbox', { name: /익명 허용/ });
   const checkboxB = b.getByRole('checkbox', { name: /익명 허용/ });
 
-  // Default allowAnonymous=true → both controllers show the box checked.
+  // Default allowAnonymous=true → both players show the box checked.
   await expect(checkboxA).toBeChecked({ timeout: 15_000 });
   await expect(checkboxB).toBeChecked({ timeout: 15_000 });
 

@@ -193,18 +193,41 @@ def test_VOL_clamp(make_client, raw, expected):
     assert c.last_state()["volume"] == expected
 
 
-# ── PLY-03: controllers only (player rejected) ─────────────────────────────
-def test_PLY_03_controller_only(make_client):
+# ── PLY-03: guest events allowed from a player (changeTrack/setVolume/togglePlay) ─
+def test_PLY_03_player_allowed_guest_events(make_client):
     p = make_client()
     room = room_code()
     assert p.join(room, role="player")["ok"] is True
+    # GUEST events: both roles may emit. A player (the MAIN) is allowed.
     for event, payload in [
         (SET_VOLUME, {"volume": 30}),
         (TOGGLE_PLAY, {"isPlaying": True}),
         (CHANGE_TRACK, {"url": VALID_URL, "reason": "x"}),
+        (ENQUEUE_TRACK, {"url": VALID_URL}),
+        (SET_TRACK_GAIN, {"videoId": VALID_ID, "gain": 0.5}),
     ]:
         ack = p.call(event, payload)
+        assert ack["ok"] is True
+
+
+# ── PLY-03b: main events rejected from a controller (player only) ──────────
+def test_PLY_03b_controller_rejected_main_events(make_client):
+    c = make_client()
+    room = room_code()
+    assert c.join(room, role="controller")["ok"] is True
+    # MAIN events: player-only. A controller (limited guest) is rejected.
+    for event, payload in [
+        (NEXT_TRACK, {}),
+        (REMOVE_QUEUED, {"index": 0}),
+        (SET_REPEAT, {"mode": "all"}),
+        (SET_SHUFFLE, {"shuffle": True}),
+        (SEEK_TO, {"seconds": 10}),
+        (UPDATE_SETTINGS, {"settings": {"allowAnonymous": False}}),
+        (SET_SCHEDULE, {"schedule": None}),
+    ]:
+        ack = c.call(event, payload)
         assert ack["ok"] is False
+        assert ack.get("error") == "player only"
 
 
 # ── PAIR-05/06/07: password create / wrong / correct ───────────────────────
@@ -368,10 +391,10 @@ def test_QUEUE_01_02_enqueue_appends(make_client):
 
 # ── QUEUE-06: out-of-range removeQueued index is rejected, queue unchanged ──
 def test_QUEUE_06_remove_out_of_range(make_client):
-    c = make_client()
+    p = make_client()
     room = room_code()
-    c.join(room)
-    ack = c.call(REMOVE_QUEUED, {"index": 5})
+    p.join(room, role="player")  # removeQueued is a MAIN action: player-only
+    ack = p.call(REMOVE_QUEUED, {"index": 5})
     assert ack["ok"] is False
     assert ack.get("error") == "invalid index"
 
@@ -380,7 +403,7 @@ def test_QUEUE_06_remove_out_of_range(make_client):
 def test_QUEUE_07_next_track_advances(make_client):
     c = make_client()
     room = room_code()
-    c.join(room)
+    c.join(room, role="player")  # nextTrack is a MAIN action: player-only
     # A becomes current (auto-start); B then queues behind it.
     assert c.call(ENQUEUE_TRACK, {"url": VALID_URL})["ok"] is True
     c.wait_for_state(lambda s: (s.get("currentTrack") or {}).get("id") == VALID_ID)
@@ -402,7 +425,7 @@ def test_QUEUE_07_next_track_advances(make_client):
 def test_QUEUE_08_next_track_empty_noop(make_client):
     c = make_client()
     room = room_code()
-    c.join(room)
+    c.join(room, role="player")  # nextTrack is a MAIN action: player-only
     c.states.clear()
     ack = c.call(NEXT_TRACK, {})
     assert ack["ok"] is True
@@ -434,14 +457,23 @@ def test_QUEUE_09_track_ended_advances(make_client):
     assert skips and skips[-1].get("detail", {}).get("auto") is True
 
 
-# ── QUEUE-11: enqueue is controllers only (nextTrack is allowed for Player) ──
-def test_QUEUE_11_enqueue_controllers_only(make_client):
+# ── QUEUE-11: enqueue is a GUEST event (both roles); a player may enqueue + next ─
+def test_QUEUE_11_player_can_enqueue_and_next(make_client):
     p = make_client()
     room = room_code()
     assert p.join(room, role="player")["ok"] is True
-    assert p.call(ENQUEUE_TRACK, {"url": VALID_URL})["ok"] is False
-    # nextTrack is now allowed for the Player too (empty queue → ok no-op).
+    # enqueue is a GUEST event (both roles allowed); a player (MAIN) is allowed.
+    assert p.call(ENQUEUE_TRACK, {"url": VALID_URL})["ok"] is True
+    # nextTrack is a MAIN action: a player may advance.
     assert p.call(NEXT_TRACK, {})["ok"] is True
+
+
+# ── QUEUE-11b: a controller may enqueue (guest event) ──────────────────────
+def test_QUEUE_11b_controller_can_enqueue(make_client):
+    c = make_client()
+    room = room_code()
+    assert c.join(room, role="controller")["ok"] is True
+    assert c.call(ENQUEUE_TRACK, {"url": VALID_URL})["ok"] is True
 
 
 # ── NEXT-PLAYER: a Player may press "다음 곡" and advance the queue ──────────
@@ -479,7 +511,7 @@ def test_QUEUE_12_track_ended_player_only(make_client):
 def test_SEEK_01_02_seek_updates_last_seek_and_logs(make_client):
     c = make_client()
     room = room_code()
-    c.join(room)
+    c.join(room, role="player")  # seekTo is a MAIN action: player-only
     c.states.clear()
     c.activities.clear()
     ack = c.call(SEEK_TO, {"seconds": 42})  # no reason
@@ -498,19 +530,20 @@ def test_SEEK_01_02_seek_updates_last_seek_and_logs(make_client):
 def test_SEEK_03_negative_seconds_rejected(make_client):
     c = make_client()
     room = room_code()
-    c.join(room)
+    c.join(room, role="player")  # seekTo is a MAIN action: player-only
     ack = c.call(SEEK_TO, {"seconds": -5})
     assert ack["ok"] is False
     assert ack.get("error") == "invalid seconds"
 
 
-# ── SEEK-05: seekTo is controllers only (player rejected) ───────────────────
-def test_SEEK_05_seek_controllers_only(make_client):
-    p = make_client()
+# ── SEEK-05: seekTo is a MAIN action (controller rejected, player only) ─────
+def test_SEEK_05_seek_player_only(make_client):
+    c = make_client()
     room = room_code()
-    assert p.join(room, role="player")["ok"] is True
-    ack = p.call(SEEK_TO, {"seconds": 10})
+    assert c.join(room, role="controller")["ok"] is True
+    ack = c.call(SEEK_TO, {"seconds": 10})
     assert ack["ok"] is False
+    assert ack.get("error") == "player only"
 
 
 # ── SEEK-06: a Player's progress updates state.progress, no activity entry ──
@@ -550,14 +583,14 @@ def test_SEEK_08_progress_player_only(make_client):
 
 # ── SET-01: updateSettings broadcasts new settings + logs settings activity ─
 def test_SET_01_update_settings_broadcasts(make_client):
-    controller = make_client()
+    player = make_client()
     observer = make_client()
     room = room_code()
-    controller.join(room)
-    observer.join(room, role="player")
+    player.join(room, role="player")  # updateSettings is a MAIN action: player-only
+    observer.join(room, role="controller")
     observer.states.clear()
     observer.activities.clear()
-    ack = controller.call(UPDATE_SETTINGS, {"settings": {"allowAnonymous": False}})
+    ack = player.call(UPDATE_SETTINGS, {"settings": {"allowAnonymous": False}})
     assert ack["ok"] is True
     st = observer.wait_for_state(lambda s: s.get("settings", {}).get("allowAnonymous") is False)
     assert st is not None
@@ -567,21 +600,35 @@ def test_SET_01_update_settings_broadcasts(make_client):
 
 # ── SET-02: anon controller's changeTrack rejected when allowAnonymous=false ─
 def test_SET_02_anon_change_track_rejected(make_client):
-    c = make_client()  # joins WITHOUT a nickname → anonymous
+    player = make_client()  # player flips the setting (updateSettings is main-only)
+    c = make_client()  # joins WITHOUT a nickname → anonymous controller
     room = room_code()
-    c.join(room)
-    assert c.call(UPDATE_SETTINGS, {"settings": {"allowAnonymous": False}})["ok"] is True
+    player.join(room, role="player")
+    c.join(room, role="controller")
+    assert player.call(UPDATE_SETTINGS, {"settings": {"allowAnonymous": False}})["ok"] is True
     ack = c.call(CHANGE_TRACK, {"url": VALID_URL, "reason": "set the vibe"})
     assert ack["ok"] is False
     assert ack.get("error") == "nickname required"
 
 
+# ── SET-02b: an anon PLAYER changeTrack is NOT gated (player/MAIN never gated) ─
+def test_SET_02b_anon_player_change_track_not_gated(make_client):
+    p = make_client()  # anonymous player
+    room = room_code()
+    p.join(room, role="player")
+    assert p.call(UPDATE_SETTINGS, {"settings": {"allowAnonymous": False}})["ok"] is True
+    ack = p.call(CHANGE_TRACK, {"url": VALID_URL, "reason": "main is never gated"})
+    assert ack["ok"] is True
+
+
 # ── SET-03: a nicknamed controller can changeTrack when allowAnonymous=false ─
 def test_SET_03_named_change_track_ok(make_client):
+    player = make_client()
     named = make_client()
     room = room_code()
-    named.join(room, nickname="dj")
-    assert named.call(UPDATE_SETTINGS, {"settings": {"allowAnonymous": False}})["ok"] is True
+    player.join(room, role="player")
+    named.join(room, role="controller", nickname="dj")
+    assert player.call(UPDATE_SETTINGS, {"settings": {"allowAnonymous": False}})["ok"] is True
     named.states.clear()
     ack = named.call(CHANGE_TRACK, {"url": VALID_URL, "reason": "i have a nickname"})
     assert ack["ok"] is True
@@ -591,10 +638,12 @@ def test_SET_03_named_change_track_ok(make_client):
 
 # ── SET-04: setVolume from an anon controller is NOT gated (no lockout) ──────
 def test_SET_04_anon_set_volume_not_gated(make_client):
-    c = make_client()  # anonymous
+    player = make_client()
+    c = make_client()  # anonymous controller
     room = room_code()
-    c.join(room)
-    assert c.call(UPDATE_SETTINGS, {"settings": {"allowAnonymous": False}})["ok"] is True
+    player.join(room, role="player")
+    c.join(room, role="controller")
+    assert player.call(UPDATE_SETTINGS, {"settings": {"allowAnonymous": False}})["ok"] is True
     c.states.clear()
     ack = c.call(SET_VOLUME, {"volume": 42})
     assert ack["ok"] is True
@@ -708,7 +757,7 @@ def test_QUEUE_13_remove_queued_happy_path(make_client):
     third_id = "3JZ_D3ELwOQ"
     c = make_client()
     room = room_code()
-    c.join(room)
+    c.join(room, role="player")  # removeQueued is a MAIN action: player-only
     # A becomes current (auto-start via changeTrack); B and C then queue → [B, C].
     assert c.call(CHANGE_TRACK, {"url": VALID_URL, "reason": "A"})["ok"] is True
     c.wait_for_state(lambda s: (s.get("currentTrack") or {}).get("id") == VALID_ID)
@@ -800,14 +849,14 @@ def test_GAIN_03_auto_seed_from_loudness(make_client):
 
 # ── MODE-01: setRepeat broadcasts state.repeat + logs a mode activity ────────
 def test_MODE_01_set_repeat_broadcasts_and_logs(make_client):
-    controller = make_client()
+    player = make_client()
     observer = make_client()
     room = room_code()
-    controller.join(room)
-    observer.join(room, role="player")
+    player.join(room, role="player")  # setRepeat is a MAIN action: player-only
+    observer.join(room, role="controller")
     observer.states.clear()
     observer.activities.clear()
-    ack = controller.call(SET_REPEAT, {"mode": "all"})
+    ack = player.call(SET_REPEAT, {"mode": "all"})
     assert ack["ok"] is True
     st = observer.wait_for_state(lambda s: s.get("repeat") == "all")
     assert st is not None
@@ -820,7 +869,7 @@ def test_MODE_01_set_repeat_broadcasts_and_logs(make_client):
 def test_MODE_02_set_shuffle_broadcasts(make_client):
     c = make_client()
     room = room_code()
-    c.join(room)
+    c.join(room, role="player")  # setShuffle is a MAIN action: player-only
     c.states.clear()
     ack = c.call(SET_SHUFFLE, {"shuffle": True})
     assert ack["ok"] is True
@@ -836,7 +885,7 @@ def test_REPEAT_ALL_loops_from_history(make_client):
     room = room_code()
     controller.join(room)
     player.join(room, role="player")
-    assert controller.call(SET_REPEAT, {"mode": "all"})["ok"] is True
+    assert player.call(SET_REPEAT, {"mode": "all"})["ok"] is True  # main: player-only
     assert controller.call(CHANGE_TRACK, {"url": VALID_URL, "reason": "A"})["ok"] is True
     player.wait_for_state(lambda s: (s.get("currentTrack") or {}).get("id") == VALID_ID)
     assert controller.call(ENQUEUE_TRACK, {"url": SECOND_URL})["ok"] is True

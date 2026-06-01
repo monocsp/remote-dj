@@ -51,7 +51,7 @@ export default function LandingPage() {
                   : 'bg-neutral-800 text-neutral-300'
               }`}
             >
-              Controller
+              리모컨
             </button>
             <button
               type="button"
@@ -62,7 +62,7 @@ export default function LandingPage() {
                   : 'bg-neutral-800 text-neutral-300'
               }`}
             >
-              Player
+              플레이어 (메인)
             </button>
           </div>
         </div>

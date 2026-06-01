@@ -41,32 +41,32 @@ SPEC: §검증 — `withinLimit` url 2048 / reason 500 / title 200.
 ## QUEUE-05 — removeQueued로 큐에서 제거
 SPEC: §재생 큐 — 유효 index의 곡 제거, activity `dequeue`.
 
-- **Given** 큐에 1곡 이상 있는 controller
-- **When** `removeQueued { index: 0 }`
+- **Given** 큐에 1곡 이상 있는 player (removeQueued는 메인-전용)
+- **When** Player가 `removeQueued { index: 0 }`
 - **Then** ack `{ ok: true }`; 해당 곡이 `state.queue` 에서 사라짐; `activity` `type === 'dequeue'`
 
 ## QUEUE-06 — 범위 밖 index 제거는 거부
 SPEC: §재생 큐 — `index` 가 `[0, queue.length)` 정수가 아니면 거부.
 
-- **Given** 방의 controller (큐 비어있거나 짧음)
-- **When** `removeQueued { index: 5 }`
+- **Given** 방의 player (큐 비어있거나 짧음, removeQueued는 메인-전용)
+- **When** Player가 `removeQueued { index: 5 }`
 - **Then** ack `{ ok: false, error: 'invalid index' }`, 큐 불변
 
 ## QUEUE-07 — nextTrack은 큐 맨 앞을 currentTrack으로 승격하고 큐를 줄임
-SPEC: §재생 큐 — `nextTrack` 큐 비어있지 않으면 head→currentTrack, isPlaying:true, activity `skip`.
+SPEC: §재생 큐 — `nextTrack`(메인-전용) 큐 비어있지 않으면 head→currentTrack, isPlaying:true, activity `skip`.
 **전제**: 큐를 채우려면 먼저 다른 곡(A)을 재생 중으로 만든 뒤 B 를 enqueue 한다
 (IDLE 방에 첫 enqueue 하면 B 가 곧장 auto-start 되어 큐에 남지 않으므로).
 
-- **Given** 현재 곡 A 가 재생 중이고 큐에 `id === '9bZkp7q19f0'`(B) 1곡이 있는 controller
-- **When** `nextTrack {}`
+- **Given** 현재 곡 A 가 재생 중이고 큐에 `id === '9bZkp7q19f0'`(B) 1곡이 있는 player
+- **When** Player가 `nextTrack {}`
 - **Then** ack `{ ok: true }`; `state.currentTrack.id === '9bZkp7q19f0'`, `queue.length === 0`,
   `isPlaying === true`; `activity` `type === 'skip'`
 
 ## QUEUE-08 — 빈 큐에서 nextTrack은 no-op 성공
 SPEC: §재생 큐 — 큐가 비어있으면 `{ ok:true }` no-op(브로드캐스트 없음).
 
-- **Given** 큐가 빈 방의 controller
-- **When** `nextTrack {}`
+- **Given** 큐가 빈 방의 player (nextTrack는 메인-전용)
+- **When** Player가 `nextTrack {}`
 - **Then** ack `{ ok: true }`; 상태/로그 불변
 
 ## QUEUE-09 — Player의 trackEnded는 큐를 자동 진행
@@ -85,17 +85,20 @@ SPEC: §재생 큐 — 큐가 비어있으면 `isPlaying:false`.
 - **When** Player가 `trackEnded {}`
 - **Then** ack `{ ok: true }`; `state.isPlaying === false`
 
-## QUEUE-11 — enqueue/removeQueued는 Controller 전용 (nextTrack은 Player도 허용)
-SPEC: §권한 — `enqueueTrack`/`removeQueued` 은 controller만. **`nextTrack` 은 Controller 또는 Player**.
+## QUEUE-11 — enqueue는 게스트-허용(둘 다); removeQueued/nextTrack은 메인-전용(Player만)
+SPEC: §권한 — `enqueueTrack` 은 게스트-허용(Player·Controller 둘 다). `removeQueued`/`nextTrack` 은 메인-전용(Player만).
 
 - **Given** Player가 입장한 방
 - **When** Player가 `enqueueTrack` 발행
-- **Then** ack `{ ok: false }` (`controllers only`)
+- **Then** ack `{ ok: true }`(게스트-허용 이벤트, 메인도 발행 가능)
 - **When** Player가 `nextTrack` 발행
-- **Then** ack `{ ok: true }`(허용; 빈 큐면 no-op)
+- **Then** ack `{ ok: true }`(메인-전용; 빈 큐면 no-op)
+- **Given** Controller가 입장한 방
+- **When** Controller가 `removeQueued`/`nextTrack` 발행
+- **Then** ack `{ ok: false, error: 'player only' }`; 단 `enqueueTrack` 은 `{ ok: true }`
 
 ## NEXT-PLAYER — Player의 "다음 곡"은 큐를 진행한다
-SPEC: §재생 큐/§권한 — `nextTrack` 은 Player도 발행 가능(컨트롤러/익명 검사 생략, 입장한 방 사용).
+SPEC: §재생 큐/§권한 — `nextTrack` 은 메인-전용(Player만), 입장한 방을 사용한다.
 
 - **Given** Player + Controller가 같은 방, 현재 곡 A 재생 중 + 큐에 `id === '9bZkp7q19f0'`(B) 1곡
 - **When** Player가 `nextTrack {}`
