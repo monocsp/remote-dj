@@ -14,6 +14,7 @@ const TYPE_LABEL: Record<ActivityType, string> = {
   seek: '탐색',
   gain: '음량 보정',
   mode: '재생 모드',
+  schedule: '예약',
 };
 
 function relativeTime(ts: number): string {

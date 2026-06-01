@@ -21,6 +21,8 @@ export interface RoomRecord {
 export interface RoomStore {
   getOrCreate(roomCode: string, initialPassword?: string | null): Promise<RoomRecord>;
   get(roomCode: string): Promise<RoomRecord | undefined>;
+  /** List the codes of all rooms currently held by the store. */
+  listRoomCodes(): Promise<string[]>;
   patchState(roomCode: string, partial: Partial<RoomState>): Promise<RoomState>;
   appendActivity(roomCode: string, entry: ActivityEntry): Promise<void>;
   /** Replace the room's server-only play history (capped to the last 100). */
@@ -51,6 +53,7 @@ function createInitialState(roomCode: string): RoomState {
     lastSeek: null,
     playbackError: null,
     trackGain: {},
+    schedule: null,
   };
 }
 
@@ -106,6 +109,10 @@ export class InMemoryRoomStore implements RoomStore {
 
   async get(roomCode: string): Promise<RoomRecord | undefined> {
     return this.rooms.get(roomCode);
+  }
+
+  async listRoomCodes(): Promise<string[]> {
+    return [...this.rooms.keys()];
   }
 
   async patchState(roomCode: string, partial: Partial<RoomState>): Promise<RoomState> {

@@ -45,6 +45,7 @@ PLAYBACK_ERROR = C2S["PlaybackError"]
 SET_TRACK_GAIN = C2S["SetTrackGain"]
 SET_REPEAT = C2S["SetRepeat"]
 SET_SHUFFLE = C2S["SetShuffle"]
+SET_SCHEDULE = C2S["SetSchedule"]
 
 EV_STATE = S2C["State"]
 EV_ACTIVITY = S2C["Activity"]

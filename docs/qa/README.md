@@ -40,6 +40,7 @@
 | [seek.md](./seek.md) | 탐색(seekTo)/진행상황(progress, 비로그, 권한) | `SEEK-` |
 | [playback-error.md](./playback-error.md) | YouTube 재생 오류/복구(playbackError, 비로그, 새 곡 시 초기화, 권한) | `ERR-` |
 | [loudness.md](./loudness.md) | 음량 정규화(곡별 게인 setTrackGain, loudnessDb 자동 시드, 수동 우선, 권한) | `GAIN-` |
+| [schedule.md](./schedule.md) | 주간 예약(setSchedule 설정/검증, 분 단위 EDGE 자동 재생/종료, 수동 비간섭, 영속, 권한) | `SCHED-` |
 | [volume-playback.md](./volume-playback.md) | 음량 클램프 / 재생·일시정지 / 권한 | `VOL-`, `PLY-` |
 | [activity-log.md](./activity-log.md) | 모든 조작 로깅 / join 시 전체 로그 / 캡 | `LOG-` |
 | [realtime-invariants.md](./realtime-invariants.md) | 멀티 컨트롤러 동기화 / 방 격리 / presence / version / 재연결 / 입력 길이 | `RT-` |

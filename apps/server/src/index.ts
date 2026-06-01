@@ -6,6 +6,7 @@ import {
   type ActivityType,
   C2S,
   type ChangeTrackPayload,
+  type DayKey,
   type EnqueueTrackPayload,
   type JoinPayload,
   LIMITS,
@@ -20,14 +21,17 @@ import {
   S2C,
   type SeekToPayload,
   type SetRepeatPayload,
+  type SetSchedulePayload,
   type SetShufflePayload,
   type SetTrackGainPayload,
   type SetVolumePayload,
   type TogglePlayPayload,
   type Track,
   type UpdateSettingsPayload,
+  type WeeklySchedule,
   clampGain,
   clampVolume,
+  isHHMM,
   parseYouTubeId,
   validateReason,
   withinLimit,
@@ -141,6 +145,50 @@ function shuffledCopy<T>(a: T[]): T[] {
   return out;
 }
 
+// ── Weekly schedule helpers (pure) ────────────────────────────────────────
+// Indexed by Date.getDay() (0 = Sunday) so DAY_KEYS[now.getDay()] maps a JS
+// date to the matching DaySchedule key.
+const DAY_KEYS: DayKey[] = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
+
+/** Zero-padded local "HH:MM" for `d`. */
+function hhmm(d: Date): string {
+  const h = String(d.getHours()).padStart(2, '0');
+  const m = String(d.getMinutes()).padStart(2, '0');
+  return `${h}:${m}`;
+}
+
+/**
+ * Does the schedule want playback ON at `now`?
+ *  - null / disabled schedule → null (NO opinion; scheduler skips the room).
+ *  - day off → false.
+ *  - otherwise true iff the current local "HH:MM" is in [start, end).
+ */
+function scheduleWantsPlay(schedule: WeeklySchedule | null, now: Date): boolean | null {
+  if (!schedule || !schedule.enabled) return null;
+  const day = schedule.days[DAY_KEYS[now.getDay()]];
+  if (!day || !day.on) return false;
+  const cur = hhmm(now);
+  return day.start <= cur && cur < day.end;
+}
+
+/**
+ * Validate a WeeklySchedule (only when non-null). Requires: enabled boolean,
+ * all 7 day keys present, each day.on boolean with valid HH:MM start/end and
+ * start < end. Returns true when the schedule is structurally acceptable.
+ */
+function isValidSchedule(schedule: WeeklySchedule): boolean {
+  if (typeof schedule.enabled !== 'boolean') return false;
+  if (!schedule.days || typeof schedule.days !== 'object') return false;
+  for (const key of DAY_KEYS) {
+    const day = schedule.days[key];
+    if (!day || typeof day !== 'object') return false;
+    if (typeof day.on !== 'boolean') return false;
+    if (!isHHMM(day.start) || !isHHMM(day.end)) return false;
+    if (!(day.start < day.end)) return false;
+  }
+  return true;
+}
+
 /**
  * Wire an HTTP server + Socket.IO Server with all room handlers.
  * Exported (not auto-listening) so tests can listen on an ephemeral port.
@@ -152,6 +200,10 @@ export function createServer(
 ): {
   httpServer: HttpServer;
   io: Server;
+  // Exposed so tests can drive the scheduler with an injected `now` instead of
+  // waiting on the wall clock. Backward-compatible: existing callers that only
+  // destructure { httpServer, io } are unaffected.
+  tickSchedules: (now: Date) => Promise<void>;
 } {
   const httpServer = createHttpServer((req, res) => {
     if (req.url === '/health') {
@@ -198,6 +250,29 @@ export function createServer(
       presence: { playerConnected, controllers },
     };
     io.to(roomCode).emit(S2C.State, state);
+  }
+
+  /**
+   * Room-level activity logger. recordActivity is per-socket (uses the
+   * socket's nickname as actor); this mirrors its shape for server-originated
+   * events (e.g. the scheduler) with a null actor.
+   */
+  async function roomLog(
+    roomCode: string,
+    type: ActivityType,
+    reason: string | null,
+    detail?: Record<string, unknown>,
+  ): Promise<void> {
+    const entry: ActivityEntry = {
+      id: nanoid(8),
+      ts: Date.now(),
+      actor: null,
+      type,
+      reason,
+      detail,
+    };
+    await store.appendActivity(roomCode, entry);
+    io.to(roomCode).emit(S2C.Activity, entry);
   }
 
   /**
@@ -325,6 +400,55 @@ export function createServer(
     await log({ id: next.id });
     await broadcastState(roomCode);
   }
+
+  // ── Weekly schedule scheduler ────────────────────────────────────────────
+  // Per-room memory of the last computed "want" so transitions are
+  // EDGE-triggered: we only act when the desired state CHANGES, never on every
+  // tick. This is what stops the scheduler from fighting manual control inside
+  // an open window (a manual pause mid-window won't be re-played until the next
+  // schedule edge). A `null` want (no/disabled schedule) is "no opinion" and is
+  // never recorded as an edge.
+  const lastWant = new Map<string, boolean | null>();
+
+  /**
+   * Evaluate every room's schedule against `now` and apply edge transitions.
+   * Returned from createServer so tests can inject a deterministic `now`.
+   */
+  async function tickSchedules(now: Date): Promise<void> {
+    for (const code of await store.listRoomCodes()) {
+      const rec = await store.get(code);
+      if (!rec) continue;
+      const want = scheduleWantsPlay(rec.state.schedule, now);
+      if (want === null) continue; // no opinion → leave the room alone
+
+      const prev = lastWant.get(code);
+      lastWant.set(code, want);
+      if (want === prev) continue; // act only on the EDGE
+
+      if (want === true && !rec.state.isPlaying) {
+        // Start playback: resume the current track, else promote the queue
+        // head, else just flip the flag (nothing to play — harmless).
+        if (rec.state.currentTrack) {
+          await store.patchState(code, { isPlaying: true });
+        } else if (rec.state.queue.length > 0) {
+          await advance(code, (detail) => roomLog(code, 'skip', null, { auto: true, ...detail }));
+        } else {
+          await store.patchState(code, { isPlaying: true });
+        }
+        await roomLog(code, 'schedule', null, { auto: true, action: 'play' });
+        await broadcastState(code);
+      } else if (want === false && rec.state.isPlaying) {
+        await store.patchState(code, { isPlaying: false });
+        await roomLog(code, 'schedule', null, { auto: true, action: 'stop' });
+        await broadcastState(code);
+      }
+    }
+  }
+
+  // Check every minute on the wall clock; unref so it never blocks process /
+  // test exit. Tests bypass this and call tickSchedules(now) directly.
+  const schedTimer = setInterval(() => void tickSchedules(new Date()), 60_000);
+  schedTimer.unref();
 
   io.on('connection', (socket) => {
     const data = socket.data as SocketData;
@@ -779,6 +903,28 @@ export function createServer(
       await broadcastState(room);
     });
 
+    socket.on(C2S.SetSchedule, async (payload: SetSchedulePayload, ack: AckFn) => {
+      const room = requireController(ack);
+      if (!room) return;
+      const { schedule, reason } = payload ?? ({} as SetSchedulePayload);
+      if (!withinLimit(reason, LIMITS.reason)) {
+        ack({ ok: false, error: 'input too long' });
+        return;
+      }
+      // null clears the schedule; otherwise it must be structurally valid.
+      if (schedule !== null && (typeof schedule !== 'object' || !isValidSchedule(schedule))) {
+        ack({ ok: false, error: 'invalid schedule' });
+        return;
+      }
+
+      await store.patchState(room, { schedule });
+      await recordActivity('schedule', reason?.trim() || null, {
+        enabled: schedule?.enabled ?? false,
+      });
+      ack({ ok: true });
+      await broadcastState(room);
+    });
+
     socket.on('disconnect', async () => {
       const room = data.roomCode;
       if (!room) return;
@@ -796,7 +942,7 @@ export function createServer(
     });
   });
 
-  return { httpServer, io };
+  return { httpServer, io, tickSchedules };
 }
 
 // Auto-start unless imported (e.g. by tests).

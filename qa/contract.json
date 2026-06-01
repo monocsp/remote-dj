@@ -14,7 +14,8 @@
     "PlaybackError": "playbackError",
     "SetTrackGain": "setTrackGain",
     "SetRepeat": "setRepeat",
-    "SetShuffle": "setShuffle"
+    "SetShuffle": "setShuffle",
+    "SetSchedule": "setSchedule"
   },
   "s2c": {
     "State": "state",

@@ -5,6 +5,24 @@
 // ── Roles ────────────────────────────────────────────────────────────────
 export type Role = 'player' | 'controller';
 
+// ── Weekly play schedule ─────────────────────────────────────────────────
+// A room can be auto-started/auto-stopped on a weekly time-of-day schedule.
+// Times are "HH:MM" (24h) in the SERVER's local timezone. Transitions are
+// EDGE-triggered (see docs/SPEC.md §주간 예약) so they never fight manual
+// control mid-window.
+export type DayKey = 'mon' | 'tue' | 'wed' | 'thu' | 'fri' | 'sat' | 'sun';
+
+export interface DaySchedule {
+  on: boolean;
+  start: string; // "HH:MM" (24h)
+  end: string; // "HH:MM" (24h)
+}
+
+export interface WeeklySchedule {
+  enabled: boolean;
+  days: Record<DayKey, DaySchedule>;
+}
+
 // ── Playback modes ─────────────────────────────────────────────────────────
 // off  — when the queue empties, stop (keep currentTrack).
 // one  — on AUTO track end, replay the current track (manual next ignores this).
@@ -47,6 +65,8 @@ export interface RoomState {
   // [0.2, 1.0]. Absent ⇒ 1.0 (no change). We can only ATTENUATE (YouTube
   // setVolume maxes at 100), so gain is always ≤ 1. Shared across the room.
   trackGain: Record<string, number>;
+  // Weekly auto play/stop schedule; null (default) means no schedule set.
+  schedule: WeeklySchedule | null;
 }
 
 export type ActivityType =
@@ -60,7 +80,8 @@ export type ActivityType =
   | 'skip'
   | 'seek'
   | 'gain'
-  | 'mode';
+  | 'mode'
+  | 'schedule';
 
 export interface ActivityEntry {
   id: string;
@@ -154,6 +175,12 @@ export interface SetShufflePayload {
   reason?: string;
 }
 
+// Controller sets (or clears, with null) the weekly play schedule.
+export interface SetSchedulePayload {
+  schedule: WeeklySchedule | null;
+  reason?: string;
+}
+
 export interface Ack {
   ok: boolean;
   error?: string;
@@ -176,6 +203,7 @@ export const C2S = {
   SetTrackGain: 'setTrackGain',
   SetRepeat: 'setRepeat',
   SetShuffle: 'setShuffle',
+  SetSchedule: 'setSchedule',
 } as const;
 
 export const S2C = {
@@ -257,6 +285,13 @@ export function withinLimit(s: string | undefined, max: number): boolean {
 }
 
 const ROOM_CODE_CHARSET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+
+const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+/** True if `s` is a valid 24h "HH:MM" time string (00:00–23:59). */
+export function isHHMM(s: string): boolean {
+  return typeof s === 'string' && HHMM.test(s);
+}
 
 /** Generate a 6-char room code from the confusion-free charset. */
 export function generateRoomCode(): string {

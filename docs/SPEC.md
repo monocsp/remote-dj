@@ -61,6 +61,7 @@ type Role = 'player' | 'controller';
 | `setTrackGain` | C→S | `{ videoId: string; gain: number; reason?: string }` | **Controller 전용**. `videoId` 가 비어있지 않은 문자열이 아니면 `{ ok:false, error:'invalid videoId' }`. `clampGain(gain)` 으로 `[0.2, 1.0]` 보정 후 `trackGain[videoId]` 에 설정, activity `gain`, detail `{videoId, gain}`, 브로드캐스트. **사유 선택** |
 | `setRepeat` | C→S | `{ mode: 'off'\|'one'\|'all'; reason?: string }` | **Controller 전용**. `mode` 가 `off`/`one`/`all` 이 아니면 `{ ok:false, error:'invalid mode' }`. `repeat` 갱신, activity `mode`, detail `{repeat}`, 브로드캐스트. **사유 선택** |
 | `setShuffle` | C→S | `{ shuffle: boolean; reason?: string }` | **Controller 전용**. `shuffle` 를 boolean 으로 강제. `shuffle` 갱신, activity `mode`, detail `{shuffle}`, 브로드캐스트. **사유 선택** |
+| `setSchedule` | C→S | `{ schedule: WeeklySchedule \| null; reason?: string }` | **Controller 전용**. `schedule` 가 `null` 이면 예약 해제. 아니면 검증(`enabled` boolean, 7개 요일 키, 각 `on` boolean + `isHHMM(start)`/`isHHMM(end)` + `start < end`) — 실패 시 `{ ok:false, error:'invalid schedule' }`. `schedule` 갱신, activity `schedule`(detail `{enabled}`), 브로드캐스트. **사유 선택** |
 | `state` | S→C | `RoomState` | join 직후 + 모든 변경 후 브로드캐스트 |
 | `activity` | S→C | `ActivityEntry` | 신규 항목 1건 |
 | `activityLog` | S→C | `ActivityEntry[]` | join 직후 전체 로그 |
@@ -103,11 +104,26 @@ interface RoomState {
   // 곡별 음량 정규화 게인: videoId → 감쇠 계수 [0.2, 1.0]. 없으면 1.0(변경 없음).
   // setVolume 이 100 을 넘지 못하므로 감쇠(≤1)만 가능. 방 전체 공유.
   trackGain: Record<string, number>;
+  // 주간 자동 재생/종료 예약(없으면 null). 서버 로컬 타임존 기준.
+  schedule: WeeklySchedule | null;
+}
+
+type DayKey = 'mon' | 'tue' | 'wed' | 'thu' | 'fri' | 'sat' | 'sun';
+
+interface DaySchedule {
+  on: boolean;
+  start: string; // "HH:MM" (24h)
+  end: string;   // "HH:MM" (24h)
+}
+
+interface WeeklySchedule {
+  enabled: boolean;
+  days: Record<DayKey, DaySchedule>;
 }
 
 type ActivityType =
   | 'track_change' | 'volume' | 'play' | 'pause' | 'settings'
-  | 'enqueue' | 'dequeue' | 'skip' | 'seek' | 'gain' | 'mode';
+  | 'enqueue' | 'dequeue' | 'skip' | 'seek' | 'gain' | 'mode' | 'schedule';
 
 interface ActivityEntry {
   id: string;
@@ -221,6 +237,35 @@ activity `gain`(detail `{videoId, gain}`)을 남긴 뒤 브로드캐스트한다
 **Player 적용**: Player 는 `effectiveVolume = clamp(round(volume × (trackGain[currentTrack.id] ?? 1)))`
 로 실제 재생 음량을 계산해 적용한다(master `volume` 은 그대로 두고 곡별로만 감쇠).
 
+## 주간 예약(스케줄) — 자동 재생/종료
+
+방은 선택적으로 **주간 예약**(`RoomState.schedule: WeeklySchedule | null`, 신규 방 기본 `null`)을 가진다.
+요일별로 `on` 여부와 `start`/`end` 시각("HH:MM", 24h)을 지정하면, 서버가 그 시간대에 맞춰
+**자동으로 재생을 시작/종료**한다. 시각은 모두 **서버 로컬 타임존** 기준이다.
+
+| 동작 | 발행자 | 사유 | 효과 |
+| --- | --- | --- | --- |
+| `setSchedule` | **Controller 전용** | **선택** | `schedule`(또는 `null`로 해제)을 검증·저장. activity `schedule`(detail `{enabled}`), 브로드캐스트 |
+
+- **검증**(`schedule != null` 일 때): `enabled` boolean, `days` 에 7개 요일 키(`mon`..`sun`) 모두 존재,
+  각 `day.on` boolean + `isHHMM(start)` + `isHHMM(end)` + `start < end`. 하나라도 위반하면
+  `{ ok:false, error:'invalid schedule' }`. `null` 은 예약 해제로 항상 허용.
+- **분 단위 체크**: 서버는 60초마다 현재 로컬 시각을 평가한다(`setInterval(..., 60_000)`).
+  테스트/QA 는 `createServer` 가 반환하는 `tickSchedules(now)` 로 결정적인 `now` 를 주입한다.
+  타이머는 `.unref()` 되어 프로세스/테스트 종료를 막지 않는다.
+- **"원하는 상태"(want) 계산**: 예약이 없거나 `enabled === false` 면 **무의견(null)** — 그 방은 건드리지 않는다.
+  해당 요일이 `off` 면 `false`. 켜져 있으면 `start <= 현재시각("HH:MM") < end` 이면 `true`, 아니면 `false`.
+- **EDGE-triggered(가장자리 전이)**: 방마다 직전 want 를 기억해 **want 가 바뀌는 순간에만** 동작한다.
+  매 분 강제로 상태를 덮어쓰지 **않는다** — 따라서 윈도우 **중간에 수동 일시정지**해도, 다음 예약
+  가장자리(윈도우 시작/종료)까지는 다시 재생을 켜지 않는다(수동 제어와 싸우지 않음). 무의견(null)은
+  가장자리로 기록하지 않는다.
+- **시작(want `true` 이고 정지 상태)**: `currentTrack` 이 있으면 `isPlaying:true` 로 재개,
+  없고 큐가 있으면 `advance()` 로 큐 맨 앞 곡 승격, 둘 다 없으면 `isPlaying:true` 만 세팅(무해).
+  그 뒤 activity `schedule`(detail `{auto:true, action:'play'}`) 기록 + 브로드캐스트.
+- **종료(want `false` 이고 재생 중)**: `isPlaying:false`, activity `schedule`(detail `{auto:true, action:'stop'}`),
+  브로드캐스트.
+- **영속**: 예약은 `RoomState.schedule` 의 일부이므로 `PersistentRoomStore` 에 의해 **자동 저장**된다.
+
 ## 검증 규칙
 
 | 대상 | 규칙 | 위반 시 |
@@ -244,6 +289,7 @@ activity `gain`(detail `{videoId, gain}`)을 남긴 뒤 브로드캐스트한다
 | `clampVolume` | `(v: number) => number` | 반올림 후 0..100 |
 | `clampGain` | `(g: number) => number` | 소수 2자리 반올림 후 0.2..1.0 (감쇠 전용) |
 | `generateRoomCode` | `() => string` | 6자 룸 코드 생성 |
+| `isHHMM` | `(s: string) => boolean` | 유효한 24h "HH:MM"(00:00–23:59)이면 true |
 
 ## Activity Log 스키마 + 예시
 
@@ -315,6 +361,7 @@ activity `gain`(detail `{videoId, gain}`)을 남긴 뒤 브로드캐스트한다
 | `setTrackGain` | X | O |
 | `setRepeat` | X | O |
 | `setShuffle` | X | O |
+| `setSchedule` | X | O |
 
 ## 비범위 (추후)
 

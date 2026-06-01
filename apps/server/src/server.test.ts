@@ -27,6 +27,7 @@ function waitFor<T = unknown>(
 describe('remote-dj server', () => {
   let io: ReturnType<typeof createServer>['io'];
   let httpServer: ReturnType<typeof createServer>['httpServer'];
+  let tick: (now: Date) => Promise<void>;
   let port: number;
   const clients: ClientSocket[] = [];
 
@@ -41,7 +42,11 @@ describe('remote-dj server', () => {
     // are deterministic (keep the default in-memory store). The loudness stub
     // returns null so loudness auto-seed is a no-op in most tests; GAIN-03/04
     // create their own server with a loud stub.
-    ({ io, httpServer } = createServer(
+    ({
+      io,
+      httpServer,
+      tickSchedules: tick,
+    } = createServer(
       undefined,
       async () => 'Stub Title',
       async () => null,
@@ -1110,5 +1115,144 @@ describe('remote-dj server', () => {
       local.io.close();
       await new Promise<void>((resolve) => local.httpServer.close(() => resolve()));
     }
+  });
+
+  // ── SCHED-xx: weekly play schedule (예약 재생/종료) ──────────────────────────
+  // 2026-06-01 is a Monday. Fixed instants keep the time-based logic
+  // deterministic (the scheduler is driven via the injected `tick(now)`).
+  const MON_10 = new Date(2026, 5, 1, 10, 0, 0); // Mon 10:00 (inside 09–18)
+  const MON_20 = new Date(2026, 5, 1, 20, 0, 0); // Mon 20:00 (outside 09–18)
+
+  type DK = 'mon' | 'tue' | 'wed' | 'thu' | 'fri' | 'sat' | 'sun';
+  // Mon ON 09:00–18:00, every other day OFF.
+  function monSchedule() {
+    const off = { on: false, start: '00:00', end: '23:59' };
+    const days = {} as Record<DK, { on: boolean; start: string; end: string }>;
+    for (const d of ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'] as DK[]) {
+      days[d] = { ...off };
+    }
+    days.mon = { on: true, start: '09:00', end: '18:00' };
+    return { enabled: true, days };
+  }
+
+  it('SCHED-01 setSchedule broadcasts state.schedule + logs a schedule activity', async () => {
+    const room = 'SCHED1';
+    const controller = connect();
+    const observer = connect();
+    await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+    await observer.emitWithAck(C2S.Join, { roomCode: room, role: 'player' });
+
+    const enabled = (s: RoomState) => s.schedule?.enabled === true;
+    const isSchedule = (a: ActivityEntry) => a.type === 'schedule';
+    const obsState = waitFor<RoomState>(observer, S2C.State, enabled);
+    const obsActivity = waitFor<ActivityEntry>(observer, S2C.Activity, isSchedule);
+
+    const ack = (await controller.emitWithAck(C2S.SetSchedule, {
+      schedule: monSchedule(),
+    })) as Ack;
+    expect(ack.ok).toBe(true);
+
+    const [os, oa] = await Promise.all([obsState, obsActivity]);
+    expect(os.schedule?.enabled).toBe(true);
+    expect(oa.type).toBe('schedule');
+  });
+
+  it('SCHED-02 rejects a schedule with start>end or bad HH:MM', async () => {
+    const room = 'SCHED2';
+    const controller = connect();
+    await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+
+    const badRange = monSchedule();
+    badRange.days.mon = { on: true, start: '18:00', end: '09:00' };
+    const rangeAck = (await controller.emitWithAck(C2S.SetSchedule, {
+      schedule: badRange,
+    })) as Ack;
+    expect(rangeAck.ok).toBe(false);
+    expect(rangeAck.error).toBe('invalid schedule');
+
+    const badTime = monSchedule();
+    badTime.days.mon = { on: true, start: '09:00', end: '25:99' };
+    const timeAck = (await controller.emitWithAck(C2S.SetSchedule, {
+      schedule: badTime,
+    })) as Ack;
+    expect(timeAck.ok).toBe(false);
+    expect(timeAck.error).toBe('invalid schedule');
+  });
+
+  it('SCHED-03 auto-starts playback on the schedule edge inside the window', async () => {
+    const room = 'SCHED3';
+    const controller = connect();
+    await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+
+    await controller.emitWithAck(C2S.SetSchedule, { schedule: monSchedule() });
+    const hasTrack = waitFor<RoomState>(
+      controller,
+      S2C.State,
+      (s) => s.currentTrack?.id === 'dQw4w9WgXcQ',
+    );
+    await controller.emitWithAck(C2S.ChangeTrack, { url: VALID_URL, reason: 'A' });
+    await hasTrack;
+    // Manually pause so the scheduler edge has something to turn back on.
+    await controller.emitWithAck(C2S.TogglePlay, { isPlaying: false });
+
+    const playing = waitFor<RoomState>(controller, S2C.State, (s) => s.isPlaying === true);
+    await tick(MON_10); // edge: no-opinion/false → true ⇒ start
+    const s = await playing;
+    expect(s.isPlaying).toBe(true);
+  });
+
+  it('SCHED-04 auto-stops playback on the schedule edge outside the window', async () => {
+    const room = 'SCHED4';
+    const controller = connect();
+    await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+
+    await controller.emitWithAck(C2S.SetSchedule, { schedule: monSchedule() });
+    const playing = waitFor<RoomState>(controller, S2C.State, (s) => s.isPlaying === true);
+    await controller.emitWithAck(C2S.ChangeTrack, { url: VALID_URL, reason: 'A' });
+    await playing;
+
+    const stopped = waitFor<RoomState>(controller, S2C.State, (s) => s.isPlaying === false);
+    await tick(MON_20); // edge: → false ⇒ stop
+    const s = await stopped;
+    expect(s.isPlaying).toBe(false);
+  });
+
+  it('SCHED-05 does not fight a manual pause mid-window (edge-triggered)', async () => {
+    const room = 'SCHED5';
+    const controller = connect();
+    await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+
+    await controller.emitWithAck(C2S.SetSchedule, { schedule: monSchedule() });
+    const hasTrack = waitFor<RoomState>(
+      controller,
+      S2C.State,
+      (s) => s.currentTrack?.id === 'dQw4w9WgXcQ',
+    );
+    await controller.emitWithAck(C2S.ChangeTrack, { url: VALID_URL, reason: 'A' });
+    await hasTrack;
+    // Pause so the first tick has a real edge (false → true ⇒ play).
+    const prePaused = waitFor<RoomState>(controller, S2C.State, (s) => s.isPlaying === false);
+    await controller.emitWithAck(C2S.TogglePlay, { isPlaying: false });
+    await prePaused;
+
+    // First tick is the edge → playing.
+    const playing = waitFor<RoomState>(controller, S2C.State, (s) => s.isPlaying === true);
+    await tick(MON_10);
+    await playing;
+
+    // Manual pause mid-window.
+    const paused = waitFor<RoomState>(controller, S2C.State, (s) => s.isPlaying === false);
+    await controller.emitWithAck(C2S.TogglePlay, { isPlaying: false });
+    await paused;
+
+    // Still inside the window, but no edge (want stays true) → must NOT resume.
+    await tick(new Date(2026, 5, 1, 10, 1, 0));
+
+    // Probe a fresh broadcast (setVolume always broadcasts) and confirm the
+    // manual pause survived — the scheduler did not flip isPlaying back on.
+    const probe = waitFor<RoomState>(controller, S2C.State, (s) => s.volume === 33);
+    await controller.emitWithAck(C2S.SetVolume, { volume: 33 });
+    const latest = await probe;
+    expect(latest.isPlaying).toBe(false);
   });
 });

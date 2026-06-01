@@ -29,6 +29,7 @@ from contract import (
     REMOVE_QUEUED,
     SEEK_TO,
     SET_REPEAT,
+    SET_SCHEDULE,
     SET_SHUFFLE,
     SET_TRACK_GAIN,
     SET_VOLUME,
@@ -797,3 +798,55 @@ def test_OFF_STOP_stops_on_empty_queue(make_client):
     assert st is not None
     assert st["isPlaying"] is False
     assert st["currentTrack"]["id"] == VALID_ID
+
+
+# ── SCHED-xx: weekly play schedule ──────────────────────────────────────────
+# NOTE: only the set/validate behaviour is black-box testable here. The
+# time-based auto play/stop transitions (SCHED-03/04/05) depend on the SERVER's
+# wall clock, which this over-the-wire harness cannot control — they are
+# covered by the vitest integration tests (which inject a deterministic `now`
+# via the createServer-returned tickSchedules). See docs/qa/schedule.md.
+
+DAY_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+
+
+def _mon_schedule() -> dict:
+    days = {d: {"on": False, "start": "00:00", "end": "23:59"} for d in DAY_KEYS}
+    days["mon"] = {"on": True, "start": "09:00", "end": "18:00"}
+    return {"enabled": True, "days": days}
+
+
+# ── SCHED-01: setSchedule broadcasts state.schedule + logs schedule activity ─
+def test_SCHED_01_set_schedule_broadcasts_and_logs(make_client):
+    controller = make_client()
+    observer = make_client()
+    room = room_code()
+    controller.join(room)
+    observer.join(room, role="player")
+    observer.states.clear()
+    observer.activities.clear()
+    ack = controller.call(SET_SCHEDULE, {"schedule": _mon_schedule()})
+    assert ack["ok"] is True
+    st = observer.wait_for_state(lambda s: (s.get("schedule") or {}).get("enabled") is True)
+    assert st is not None
+    assert st["schedule"]["enabled"] is True
+    assert any(a["type"] == "schedule" for a in observer.activities)
+
+
+# ── SCHED-02: invalid schedule (start>end or bad HH:MM) is rejected ─────────
+def test_SCHED_02_invalid_schedule_rejected(make_client):
+    c = make_client()
+    room = room_code()
+    c.join(room)
+
+    bad_range = _mon_schedule()
+    bad_range["days"]["mon"] = {"on": True, "start": "18:00", "end": "09:00"}
+    ack = c.call(SET_SCHEDULE, {"schedule": bad_range})
+    assert ack["ok"] is False
+    assert ack.get("error") == "invalid schedule"
+
+    bad_time = _mon_schedule()
+    bad_time["days"]["mon"] = {"on": True, "start": "09:00", "end": "25:99"}
+    ack2 = c.call(SET_SCHEDULE, {"schedule": bad_time})
+    assert ack2["ok"] is False
+    assert ack2.get("error") == "invalid schedule"
