@@ -9,11 +9,26 @@ import {
   useLastError,
   useLastSeek,
   useProgress,
+  useQueue,
+  useSchedule,
   useTrackGain,
   useVolume,
 } from '@/lib/roomStore';
+import type { DayKey } from '@remote-dj/shared';
 import { useSearchParams } from 'next/navigation';
 import { Suspense, useEffect, useRef, useState } from 'react';
+
+// Korean day labels, iterated in week order mon→sun.
+const DAY_ORDER: DayKey[] = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
+const DAY_LABEL: Record<DayKey, string> = {
+  mon: '월',
+  tue: '화',
+  wed: '수',
+  thu: '목',
+  fri: '금',
+  sat: '토',
+  sun: '일',
+};
 
 // NOTE: YouTube login is handled in the phone's own browser session — the
 // Player must be signed into YouTube in this browser for playback to work.
@@ -95,6 +110,8 @@ function PlayerInner() {
   const trackGain = useTrackGain();
   const lastSeek = useLastSeek();
   const progress = useProgress();
+  const queue = useQueue();
+  const schedule = useSchedule();
 
   // Latest local YouTube playback error code (null = no current error).
   const [errorCode, setErrorCode] = useState<number | null>(null);
@@ -266,6 +283,46 @@ function PlayerInner() {
         <p className="mt-1 text-lg font-semibold">
           {currentTrack?.title ?? (currentTrack ? '(제목 없음)' : '재생 중인 곡 없음')}
         </p>
+      </div>
+
+      <div className="rounded-xl bg-neutral-900 p-4">
+        <p className="text-xs uppercase tracking-wide text-neutral-500">다음 곡</p>
+        {queue.length === 0 ? (
+          <p className="mt-1 text-base text-neutral-500">다음 곡 없음</p>
+        ) : (
+          <ol className="mt-2 flex flex-col gap-2">
+            {queue.map((track, index) => (
+              <li key={`${track.id}-${index}`} className="flex items-baseline gap-3 text-base">
+                <span className="w-6 shrink-0 text-right text-neutral-500">{index + 1}</span>
+                <span className="font-medium">{track.title ?? '(제목 없음)'}</span>
+              </li>
+            ))}
+          </ol>
+        )}
+      </div>
+
+      <div className="rounded-xl bg-neutral-900 p-4">
+        <p className="text-xs uppercase tracking-wide text-neutral-500">예약 상태</p>
+        {!schedule || !schedule.enabled ? (
+          <p className="mt-1 text-base text-neutral-500">예약 꺼짐</p>
+        ) : (
+          <>
+            <ul className="mt-2 flex flex-col gap-1">
+              {DAY_ORDER.filter((day) => schedule.days[day].on).map((day) => (
+                <li key={day} className="flex items-baseline gap-3 text-base">
+                  <span className="w-6 shrink-0 text-neutral-300">{DAY_LABEL[day]}</span>
+                  <span className="tabular-nums text-neutral-200">
+                    {schedule.days[day].start}–{schedule.days[day].end}
+                  </span>
+                </li>
+              ))}
+            </ul>
+            {DAY_ORDER.every((day) => !schedule.days[day].on) && (
+              <p className="mt-1 text-base text-neutral-500">켜진 요일 없음</p>
+            )}
+            <p className="mt-2 text-xs text-neutral-500">서버 시간 기준 자동 재생/종료</p>
+          </>
+        )}
       </div>
 
       <p className="text-center text-sm">
