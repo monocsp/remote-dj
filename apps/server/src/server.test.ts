@@ -50,6 +50,7 @@ describe('remote-dj server', () => {
       undefined,
       async () => 'Stub Title',
       async () => null,
+      async () => true,
     ));
     await new Promise<void>((resolve) => {
       httpServer.listen(0, '127.0.0.1', () => resolve());
@@ -435,7 +436,7 @@ describe('remote-dj server', () => {
     expect(state.queue.length).toBe(0);
   });
 
-  it('rejects enqueue and nextTrack from a player (controller-only)', async () => {
+  it('rejects enqueue from a player (controller-only); nextTrack is allowed', async () => {
     const room = 'QUEUE6';
     const player = connect();
     await player.emitWithAck(C2S.Join, { roomCode: room, role: 'player' });
@@ -443,8 +444,9 @@ describe('remote-dj server', () => {
     const enqAck = (await player.emitWithAck(C2S.EnqueueTrack, { url: VALID_URL })) as Ack;
     expect(enqAck.ok).toBe(false);
 
+    // nextTrack is now allowed for the Player too (empty queue → ok no-op).
     const nextAck = (await player.emitWithAck(C2S.NextTrack, {})) as Ack;
-    expect(nextAck.ok).toBe(false);
+    expect(nextAck.ok).toBe(true);
   });
 
   it('rejects trackEnded from a controller (player-only)', async () => {
@@ -640,48 +642,108 @@ describe('remote-dj server', () => {
 
   // ── ERR-xx: YouTube playback error / recovery ───────────────────────────────
 
-  it('ERR-01 a player playbackError sets broadcast state.playbackError.code', async () => {
+  it('EMB-01 rejects a non-embeddable changeTrack/enqueue at add time', async () => {
+    // Dedicated server whose embeddability resolver reports false (embed disabled).
+    const local = createServer(
+      undefined,
+      async () => 'T',
+      async () => null,
+      async () => false,
+    );
+    await new Promise<void>((resolve) => local.httpServer.listen(0, '127.0.0.1', () => resolve()));
+    const localPort = (local.httpServer.address() as AddressInfo).port;
+    const localClients: ClientSocket[] = [];
+    const localConnect = () => {
+      const s = ioClient(`http://127.0.0.1:${localPort}`, { forceNew: true });
+      localClients.push(s);
+      return s;
+    };
+
+    try {
+      const controller = localConnect();
+      await controller.emitWithAck(C2S.Join, { roomCode: 'EMB01', role: 'controller' });
+
+      const changeAck = (await controller.emitWithAck(C2S.ChangeTrack, {
+        url: VALID_URL,
+        reason: 'try a blocked video',
+      })) as Ack;
+      expect(changeAck.ok).toBe(false);
+      expect(changeAck.error).toBe('embed disabled');
+
+      const enqAck = (await controller.emitWithAck(C2S.EnqueueTrack, {
+        url: VALID_URL,
+      })) as Ack;
+      expect(enqAck.ok).toBe(false);
+      expect(enqAck.error).toBe('embed disabled');
+    } finally {
+      for (const c of localClients) c.disconnect();
+      local.io.close();
+      await new Promise<void>((resolve) => local.httpServer.close(() => resolve()));
+    }
+  });
+
+  it('ERR-01 a player playbackError auto-skips to the next track and logs an error', async () => {
     const room = 'ERR01';
     const controller = connect();
     const player = connect();
     await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
     await player.emitWithAck(C2S.Join, { roomCode: room, role: 'player' });
 
-    const hasError = (s: RoomState) => s.playbackError?.code === 100;
-    const controllerState = waitFor<RoomState>(controller, S2C.State, hasError);
+    // A becomes current; B queues behind it → queue = [B].
+    const onA = waitFor<RoomState>(player, S2C.State, (s) => s.currentTrack?.id === 'dQw4w9WgXcQ');
+    await controller.emitWithAck(C2S.ChangeTrack, { url: VALID_URL, reason: 'A' });
+    await onA;
+    const queued = waitFor<RoomState>(player, S2C.State, (s) =>
+      s.queue.some((t) => t.id === '9bZkp7q19f0'),
+    );
+    await controller.emitWithAck(C2S.EnqueueTrack, { url: 'https://youtu.be/9bZkp7q19f0' });
+    await queued;
 
-    const ack = (await player.emitWithAck(C2S.PlaybackError, { code: 100 })) as Ack;
+    // The bad current track errors → server auto-skips to B and logs an 'error'.
+    const skipped = waitFor<RoomState>(
+      player,
+      S2C.State,
+      (s) => s.currentTrack?.id === '9bZkp7q19f0',
+    );
+    const errorLogged = waitFor<ActivityEntry>(
+      controller,
+      S2C.Activity,
+      (a) => a.type === 'error' && (a.detail as { code?: number }).code === 150,
+    );
+    const ack = (await player.emitWithAck(C2S.PlaybackError, { code: 150 })) as Ack;
     expect(ack.ok).toBe(true);
 
-    const cs = await controllerState;
-    expect(cs.playbackError?.code).toBe(100);
+    const [s, a] = await Promise.all([skipped, errorLogged]);
+    expect(s.currentTrack?.id).toBe('9bZkp7q19f0');
+    expect(a.type).toBe('error');
+    expect((a.detail as { code: number }).code).toBe(150);
   });
 
-  it('ERR-02 a subsequent changeTrack clears playbackError to null', async () => {
+  it('ERR-02 a player playbackError with an empty queue stops and keeps the error', async () => {
     const room = 'ERR02';
     const controller = connect();
     const player = connect();
     await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
     await player.emitWithAck(C2S.Join, { roomCode: room, role: 'player' });
 
-    const errored = waitFor<RoomState>(controller, S2C.State, (s) => s.playbackError?.code === 100);
-    const errAck = (await player.emitWithAck(C2S.PlaybackError, { code: 100 })) as Ack;
-    expect(errAck.ok).toBe(true);
-    await errored;
+    // A becomes current with an empty queue.
+    const onA = waitFor<RoomState>(player, S2C.State, (s) => s.currentTrack?.id === 'dQw4w9WgXcQ');
+    await controller.emitWithAck(C2S.ChangeTrack, { url: VALID_URL, reason: 'A' });
+    await onA;
 
-    const cleared = waitFor<RoomState>(
+    const stopped = waitFor<RoomState>(
       controller,
       S2C.State,
-      (s) => s.currentTrack?.id === 'dQw4w9WgXcQ',
+      (s) => s.isPlaying === false && s.playbackError?.code === 2,
     );
-    const ack = (await controller.emitWithAck(C2S.ChangeTrack, {
-      url: VALID_URL,
-      reason: 'recover',
-    })) as Ack;
+    const errorLogged = waitFor<ActivityEntry>(controller, S2C.Activity, (a) => a.type === 'error');
+    const ack = (await player.emitWithAck(C2S.PlaybackError, { code: 2 })) as Ack;
     expect(ack.ok).toBe(true);
 
-    const cs = await cleared;
-    expect(cs.playbackError).toBeNull();
+    const [s, a] = await Promise.all([stopped, errorLogged]);
+    expect(s.isPlaying).toBe(false);
+    expect(s.playbackError?.code).toBe(2);
+    expect(a.type).toBe('error');
   });
 
   it('ERR-03 rejects playbackError from a controller (player-only)', async () => {
@@ -692,6 +754,36 @@ describe('remote-dj server', () => {
     const ack = (await controller.emitWithAck(C2S.PlaybackError, { code: 100 })) as Ack;
     expect(ack.ok).toBe(false);
     expect(ack.error).toBe('player only');
+  });
+
+  it('NEXT-PLAYER a player may press 다음 곡 and advance the queue', async () => {
+    const room = 'NEXTPL';
+    const controller = connect();
+    const player = connect();
+    await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+    await player.emitWithAck(C2S.Join, { roomCode: room, role: 'player' });
+
+    // A becomes current; B queues behind it.
+    const onA = waitFor<RoomState>(player, S2C.State, (s) => s.currentTrack?.id === 'dQw4w9WgXcQ');
+    await controller.emitWithAck(C2S.ChangeTrack, { url: VALID_URL, reason: 'A' });
+    await onA;
+    const queued = waitFor<RoomState>(player, S2C.State, (s) =>
+      s.queue.some((t) => t.id === '9bZkp7q19f0'),
+    );
+    await controller.emitWithAck(C2S.EnqueueTrack, { url: 'https://youtu.be/9bZkp7q19f0' });
+    await queued;
+
+    const advanced = waitFor<RoomState>(
+      player,
+      S2C.State,
+      (s) => s.currentTrack?.id === '9bZkp7q19f0',
+    );
+    const ack = (await player.emitWithAck(C2S.NextTrack, {})) as Ack;
+    expect(ack.ok).toBe(true);
+
+    const s = await advanced;
+    expect(s.currentTrack?.id).toBe('9bZkp7q19f0');
+    expect(s.queue.length).toBe(0);
   });
 
   // ── GAP coverage (docs/TESTING.md §4) ───────────────────────────────────────

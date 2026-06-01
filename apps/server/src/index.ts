@@ -58,6 +58,9 @@ const TITLE_FETCH_TIMEOUT_MS = 3_000;
 /** Timeout for the (unofficial) YouTube loudness lookup. */
 const LOUDNESS_FETCH_TIMEOUT_MS = 4_000;
 
+/** Timeout for the YouTube oEmbed embeddability check. */
+const EMBEDDABLE_FETCH_TIMEOUT_MS = 3_000;
+
 /**
  * Best-effort resolver for a YouTube track title via the public oEmbed endpoint.
  * Never throws: returns the title string on success, or null on any
@@ -123,6 +126,51 @@ export async function defaultResolveLoudness(videoId: string): Promise<number | 
     return null;
   } finally {
     clearTimeout(timer);
+  }
+}
+
+/**
+ * Best-effort check of whether a YouTube URL is embeddable / available, via the
+ * public oEmbed endpoint. Used to reject non-embeddable videos at add time
+ * (changeTrack/enqueueTrack). Never throws. Returns:
+ *  - true  → embeddable (oEmbed 200), proceed.
+ *  - false → embedding disabled / video unavailable (oEmbed 401 or 404), reject.
+ *  - null  → UNKNOWN (other status / network error / timeout) → fail open, proceed.
+ * When REMOTE_DJ_FAKE_TITLE is set, returns true without any network access
+ * (deterministic tests / black-box QA).
+ */
+export async function defaultResolveEmbeddable(url: string): Promise<boolean | null> {
+  if (process.env.REMOTE_DJ_FAKE_TITLE) return true;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), EMBEDDABLE_FETCH_TIMEOUT_MS);
+  try {
+    const oembed = `https://www.youtube.com/oembed?url=${encodeURIComponent(url)}&format=json`;
+    const res = await fetch(oembed, { signal: controller.signal });
+    if (res.status === 200) return true;
+    if (res.status === 401 || res.status === 404) return false;
+    return null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Map a YouTube IFrame API error code to a Korean human-readable message. */
+function playbackErrorMessage(code: number): string {
+  switch (code) {
+    case 2:
+      return '잘못된 링크';
+    case 5:
+      return 'HTML5 재생 오류';
+    case 100:
+      return '영상을 찾을 수 없음';
+    case 101:
+    case 150:
+      return '임베드가 비활성화된 영상';
+    default:
+      return '재생 오류';
   }
 }
 
@@ -197,6 +245,7 @@ export function createServer(
   store: RoomStore = new InMemoryRoomStore(),
   resolveTitle: (url: string) => Promise<string | null> = defaultResolveTitle,
   resolveLoudness: (videoId: string) => Promise<number | null> = defaultResolveLoudness,
+  resolveEmbeddable: (url: string) => Promise<boolean | null> = defaultResolveEmbeddable,
 ): {
   httpServer: HttpServer;
   io: Server;
@@ -609,6 +658,13 @@ export function createServer(
         ack({ ok: false, error: 'invalid youtube url' });
         return;
       }
+      // Reject non-embeddable / unavailable videos at add time (oEmbed 401/404).
+      // null (unknown) and true both proceed — best-effort / fail-open.
+      const emb = await resolveEmbeddable(url);
+      if (emb === false) {
+        ack({ ok: false, error: 'embed disabled' });
+        return;
+      }
 
       const track: Track = {
         id,
@@ -700,6 +756,13 @@ export function createServer(
         ack({ ok: false, error: 'invalid youtube url' });
         return;
       }
+      // Reject non-embeddable / unavailable videos at add time (oEmbed 401/404).
+      // null (unknown) and true both proceed — best-effort / fail-open.
+      const emb = await resolveEmbeddable(url);
+      if (emb === false) {
+        ack({ ok: false, error: 'embed disabled' });
+        return;
+      }
 
       const track: Track = {
         id,
@@ -761,9 +824,22 @@ export function createServer(
     });
 
     socket.on(C2S.NextTrack, async (payload: NextTrackPayload, ack: AckFn) => {
-      const room = requireController(ack);
-      if (!room) return;
-      if (await anonymityBlocked(room, ack)) return;
+      // The Player may press "다음 곡" too. A player uses its joined room and
+      // skips the controller/anonymity checks; everyone else goes through the
+      // controller + anonymity gates.
+      let room: string;
+      if (data.role === 'player') {
+        if (!data.roomCode) {
+          ack({ ok: false, error: 'not in a room' });
+          return;
+        }
+        room = data.roomCode;
+      } else {
+        const r = requireController(ack);
+        if (!r) return;
+        if (await anonymityBlocked(r, ack)) return;
+        room = r;
+      }
       const { reason } = payload ?? ({} as NextTrackPayload);
       if (!withinLimit(reason, LIMITS.reason)) {
         ack({ ok: false, error: 'input too long' });
@@ -857,10 +933,26 @@ export function createServer(
         return;
       }
 
-      // A status, surfaced via RoomState only (like progress) — NOT logged.
-      await store.patchState(room, { playbackError: { code, ts: Date.now() } });
+      // A bad track is logged (code → Korean message) and skipped immediately:
+      // promote the next track if the queue has one, otherwise stop and keep the
+      // error visible so the Controller UI can surface it.
+      const rec = await store.get(room);
+      const failed = rec?.state.currentTrack ?? null;
+      await recordActivity('error', `${playbackErrorMessage(code)} (코드 ${code})`, {
+        code,
+        id: failed?.id ?? null,
+      });
+      if (rec && rec.state.queue.length > 0) {
+        // advance promotes the next track, sets isPlaying true, clears playbackError.
+        await advance(room, (detail) => recordActivity('skip', null, { auto: true, ...detail }));
+      } else {
+        await store.patchState(room, {
+          isPlaying: false,
+          playbackError: { code, ts: Date.now(), id: failed?.id ?? '' },
+        });
+        await broadcastState(room);
+      }
       ack({ ok: true });
-      await broadcastState(room);
     });
 
     socket.on(C2S.SetTrackGain, async (payload: SetTrackGainPayload, ack: AckFn) => {

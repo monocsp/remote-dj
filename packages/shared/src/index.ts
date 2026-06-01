@@ -60,7 +60,8 @@ export interface RoomState {
   // Latest seek command the Player should apply; null initially.
   lastSeek: { seconds: number; ts: number } | null;
   // Latest player-reported playback error; null when none / cleared on a new track.
-  playbackError: { code: number; ts: number } | null;
+  // `id` (when present) is the videoId that failed.
+  playbackError: { code: number; ts: number; id?: string } | null;
   // Per-track loudness-normalization gain: videoId → attenuation factor in
   // [0.2, 1.0]. Absent ⇒ 1.0 (no change). We can only ATTENUATE (YouTube
   // setVolume maxes at 100), so gain is always ≤ 1. Shared across the room.
@@ -81,7 +82,8 @@ export type ActivityType =
   | 'seek'
   | 'gain'
   | 'mode'
-  | 'schedule';
+  | 'schedule'
+  | 'error';
 
 export interface ActivityEntry {
   id: string;

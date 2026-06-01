@@ -2,6 +2,7 @@
 const ERROR_MESSAGES: Record<string, string> = {
   'reason required': '사유를 입력해 주세요',
   'invalid youtube url': '유효한 YouTube 링크가 아니에요',
+  'embed disabled': '임베드(퍼가기)가 막힌 영상이라 재생할 수 없어요',
   'input too long': '입력이 너무 길어요',
   'wrong password': '비밀번호가 올바르지 않습니다',
   'nickname required': '닉네임이 있어야 곡을 변경할 수 있어요',

@@ -267,10 +267,22 @@ function PlayerInner() {
       )}
 
       <div className="rounded-xl bg-neutral-900 p-4">
-        <p className="text-xs uppercase tracking-wide text-neutral-500">현재 곡</p>
-        <p className="mt-1 text-lg font-semibold">
-          {currentTrack?.title ?? (currentTrack ? '(제목 없음)' : '재생 중인 곡 없음')}
-        </p>
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <p className="text-xs uppercase tracking-wide text-neutral-500">현재 곡</p>
+            <p className="mt-1 truncate text-lg font-semibold">
+              {currentTrack?.title ?? (currentTrack ? '(제목 없음)' : '재생 중인 곡 없음')}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => void actions.nextTrack()}
+            disabled={queue.length === 0}
+            className="min-h-[44px] shrink-0 rounded-lg bg-emerald-500 px-4 text-sm font-bold text-neutral-950 transition disabled:opacity-40"
+          >
+            다음 곡 ⏭
+          </button>
+        </div>
       </div>
 
       <div className="rounded-xl bg-neutral-900 p-4">

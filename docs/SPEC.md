@@ -47,17 +47,17 @@ type Role = 'player' | 'controller';
 | 이름 | 방향 | 페이로드 | ack / 결과 |
 | --- | --- | --- | --- |
 | `join` | C→S | `{ roomCode: string; role: Role; nickname?: string; password?: string }` | `{ ok, error? }`; 성공 시 해당 소켓에 `state` + `activityLog` 전송. 방에 비밀번호가 설정돼 있으면 일치해야 함(아래 보안 규칙) |
-| `changeTrack` | C→S | `{ url: string; reason: string; title?: string }` | reason이 trim 후 빈 문자열이면 `{ ok:false, error }`; url에서 video id 파싱 실패 시 `{ ok:false, error }` |
+| `changeTrack` | C→S | `{ url: string; reason: string; title?: string }` | reason이 trim 후 빈 문자열이면 `{ ok:false, error }`; url에서 video id 파싱 실패 시 `{ ok:false, error }`; **임베드 불가/이용 불가 영상은 추가 시점에 거부** `{ ok:false, error:'embed disabled' }`(oEmbed 401/404, best-effort/fail-open — 아래 임베드 검사 참고) |
 | `setVolume` | C→S | `{ volume: number; reason?: string }` | 서버가 `clampVolume` 으로 0..100 정수 보정 후 적용 |
 | `togglePlay` | C→S | `{ isPlaying: boolean; reason?: string }` | activity는 `play` 또는 `pause` 로 기록 |
 | `updateSettings` | C→S | `{ settings: Partial<RoomSettings>; reason?: string }` | 부분 병합 |
-| `enqueueTrack` | C→S | `{ url: string; reason?: string; title?: string }` | url 파싱 실패 시 `{ ok:false, error:'invalid youtube url' }`. **사유 선택**. 큐 끝에 추가, activity `enqueue` |
+| `enqueueTrack` | C→S | `{ url: string; reason?: string; title?: string }` | url 파싱 실패 시 `{ ok:false, error:'invalid youtube url' }`; **임베드 불가/이용 불가 영상은 추가 시점에 거부** `{ ok:false, error:'embed disabled' }`(oEmbed 401/404). **사유 선택**. 큐 끝에 추가, activity `enqueue` |
 | `removeQueued` | C→S | `{ index: number; reason?: string }` | `index` 가 `[0, queue.length)` 정수가 아니면 `{ ok:false, error:'invalid index' }`. activity `dequeue` |
-| `nextTrack` | C→S | `{ reason?: string }` | 큐가 있으면 맨 앞 곡을 `currentTrack` 으로 승격(`isPlaying:true`), activity `skip`. 큐가 비어있으면 `{ ok:true }` no-op. **사유 선택** |
+| `nextTrack` | C→S | `{ reason?: string }` | **Controller 또는 Player**가 발행 가능(Player의 "다음 곡"). 큐가 있으면 맨 앞 곡을 `currentTrack` 으로 승격(`isPlaying:true`), activity `skip`. 큐가 비어있으면 `{ ok:true }` no-op. **사유 선택** |
 | `trackEnded` | C→S | `{}` | **Player 전용**(controller가 발행 시 `{ ok:false, error:'player only' }`). 자동 next처럼 동작: 큐 있으면 승격(activity `skip`, detail `{auto:true}`), 비어있으면 `isPlaying:false` |
 | `seekTo` | C→S | `{ seconds: number; reason?: string }` | **Controller 전용**. `seconds` 가 유한수 `>= 0` 가 아니면 `{ ok:false, error:'invalid seconds' }`. `lastSeek` 갱신, activity `seek`, detail `{seconds}`. **사유 선택** |
 | `progress` | C→S | `{ currentTime: number; duration: number }` | **Player 전용**(controller가 발행 시 `{ ok:false, error:'player only' }`). `currentTime`/`duration` 이 유한수 `>= 0` 가 아니면 `{ ok:false, error:'invalid progress' }`. `progress` 갱신 + 브로드캐스트. **로그 기록 안 함**(고빈도) |
-| `playbackError` | C→S | `{ code: number }` | **Player 전용**(controller가 발행 시 `{ ok:false, error:'player only' }`). `code` 가 유한수가 아니면 `{ ok:false, error:'invalid code' }`. `playbackError = { code, ts }` 갱신 + 브로드캐스트. **로그 기록 안 함**(상태로만 노출). 새 곡 시도 시 초기화 |
+| `playbackError` | C→S | `{ code: number }` | **Player 전용**(controller가 발행 시 `{ ok:false, error:'player only' }`). `code` 가 유한수가 아니면 `{ ok:false, error:'invalid code' }`. activity `error`(code→한국어 메시지) 기록 후 **자동으로 다음 곡으로 넘어감**(큐가 있으면 승격; 비어있으면 `isPlaying:false` 로 멈추고 `playbackError = { code, ts, id }` 로 오류를 유지) |
 | `setTrackGain` | C→S | `{ videoId: string; gain: number; reason?: string }` | **Controller 전용**. `videoId` 가 비어있지 않은 문자열이 아니면 `{ ok:false, error:'invalid videoId' }`. `clampGain(gain)` 으로 `[0.2, 1.0]` 보정 후 `trackGain[videoId]` 에 설정, activity `gain`, detail `{videoId, gain}`, 브로드캐스트. **사유 선택** |
 | `setRepeat` | C→S | `{ mode: 'off'\|'one'\|'all'; reason?: string }` | **Controller 전용**. `mode` 가 `off`/`one`/`all` 이 아니면 `{ ok:false, error:'invalid mode' }`. `repeat` 갱신, activity `mode`, detail `{repeat}`, 브로드캐스트. **사유 선택** |
 | `setShuffle` | C→S | `{ shuffle: boolean; reason?: string }` | **Controller 전용**. `shuffle` 를 boolean 으로 강제. `shuffle` 갱신, activity `mode`, detail `{shuffle}`, 브로드캐스트. **사유 선택** |
@@ -123,7 +123,7 @@ interface WeeklySchedule {
 
 type ActivityType =
   | 'track_change' | 'volume' | 'play' | 'pause' | 'settings'
-  | 'enqueue' | 'dequeue' | 'skip' | 'seek' | 'gain' | 'mode' | 'schedule';
+  | 'enqueue' | 'dequeue' | 'skip' | 'seek' | 'gain' | 'mode' | 'schedule' | 'error';
 
 interface ActivityEntry {
   id: string;
@@ -148,7 +148,8 @@ interface ActivityEntry {
 
 - **사유 정책**: `enqueueTrack` / `nextTrack` / `trackEnded` 의 사유는 **선택**이다(비면 `reason: null` 로 기록). 반면 **`changeTrack` 은 사유 필수**(`validateReason`)이며, `currentTrack` 만 설정하고 **큐를 건드리지 않는다** — 큐 모델과 독립적이다.
 - **제목 자동 채움(YouTube oEmbed)**: `changeTrack` / `enqueueTrack` 에서 `title` 이 생략되면(빈/미지정) 서버는 먼저 `title: null` 로 즉시 적용·브로드캐스트(스내피한 ack/broadcast 유지)한 뒤, **비동기**로 YouTube oEmbed(`https://www.youtube.com/oembed?url=...&format=json`, 3s 타임아웃)에서 제목을 best-effort 로 조회한다. 성공 시 해당 곡(아직 `title` 이 비어있는 `currentTrack`/큐 항목)에 제목을 채우고 **재브로드캐스트**한다. 실패/타임아웃/오류 시 `null` 로 두며 절대 곡 변경을 막지 않는다(fire-and-forget). 이미 제공된 non-null `title` 은 덮어쓰지 않는다.
-- **`trackEnded` 는 Player 전용**이다: controller가 발행하면 ack `{ ok:false, error:'player only' }`. 그 외 큐 제어 이벤트는 모두 Controller 전용이다.
+- **임베드 가능 검사(YouTube oEmbed)**: `changeTrack` / `enqueueTrack` 에서 url 파싱 성공 후, 서버는 oEmbed(`https://www.youtube.com/oembed?url=...&format=json`, 3s 타임아웃)로 임베드 가능 여부를 **추가 시점에 한 번** 확인한다. oEmbed 401/404 → 임베드 비활성화/이용 불가로 보고 `{ ok:false, error:'embed disabled' }` 로 **거부**한다. oEmbed 200 → 통과. 그 외 상태/네트워크 오류/타임아웃 → **unknown(null)** 이며 **fail-open**(통과)하여 검사 실패가 곡 추가를 막지 않게 한다. `REMOTE_DJ_FAKE_TITLE` 가 설정된 테스트/QA 모드에서는 네트워크 없이 항상 통과한다.
+- **`trackEnded` 는 Player 전용**이다: controller가 발행하면 ack `{ ok:false, error:'player only' }`. **`nextTrack` 은 Controller 또는 Player** 둘 다 발행할 수 있다(Player의 "다음 곡"). 그 외 큐 제어 이벤트(`enqueueTrack`/`removeQueued`)는 모두 Controller 전용이다.
 - **빈 플레이어 auto-start(QUEUE-14)**: `enqueueTrack` 시 방이 IDLE(`currentTrack === null`)이면 서버는 추가한 곡을 즉시 `currentTrack` 으로 승격하고 `isPlaying:true`, `playbackError:null`, `queue` 를 비운다. 이미 재생 중(`currentTrack !== null`)이면 큐 끝(FIFO)에만 추가한다.
 - 신규 방은 `queue: []` 로 시작한다.
 
@@ -204,10 +205,12 @@ repeat-'all' 풀에 수동 변경 곡까지 포함되게 한다. 새 곡 승격 
 
 | 동작 | 발행자 | 사유 | 효과 |
 | --- | --- | --- | --- |
-| `playbackError` | **Player 전용** | 없음 | `code` 가 유한수인지 검증(아니면 `invalid code`). `playbackError = { code, ts }` 로 갱신 + 브로드캐스트 |
+| `playbackError` | **Player 전용** | 없음 | `code` 가 유한수인지 검증(아니면 `invalid code`). activity `error` 기록 후 자동으로 다음 곡으로 진행(또는 큐가 비면 정지) |
 
-- **`playbackError` 는 Player 전용**이며 **Activity Log에 기록하지 않는다** — `progress` 와 동일하게 **상태(`RoomState.playbackError`)로만** 노출되는 status 다. controller가 발행하면 ack `{ ok:false, error:'player only' }`.
-- **새 곡 시도 시 초기화**: `changeTrack`, `nextTrack`(큐 승격 시), `trackEnded`(다음 곡 승격 시) 의 `patchState` 에서 `playbackError: null` 로 비운다. 그 외에서는 비우지 않는다.
+- **`playbackError` 는 Player 전용**이다. controller가 발행하면 ack `{ ok:false, error:'player only' }`.
+- **자동 스킵 + 로그**: 오류가 보고되면 서버는 먼저 activity `error`(code→한국어 메시지, detail `{ code, id }`)를 **기록**한 뒤, 큐에 곡이 있으면 `advance` 로 **즉시 다음 곡으로 넘어간다**(다음 곡 승격, `isPlaying:true`, `playbackError:null`). 큐가 비어있으면 `isPlaying:false` 로 멈추고 `playbackError = { code, ts, id }` 로 오류를 유지하여 Controller UI 가 계속 노출할 수 있게 한다. 즉 잘못된 곡은 추가 조작 없이 바로 건너뛰고 사유가 Activity Log 에 남는다.
+- **코드→메시지**: 2 → "잘못된 링크", 5 → "HTML5 재생 오류", 100 → "영상을 찾을 수 없음", 101/150 → "임베드가 비활성화된 영상", 그 외 → "재생 오류".
+- **새 곡 시도 시 초기화**: `changeTrack`, `nextTrack`(큐 승격 시), `trackEnded`(다음 곡 승격 시), `playbackError`(자동 스킵으로 다음 곡 승격 시) 의 `patchState` 에서 `playbackError: null` 로 비운다. 그 외에서는 비우지 않는다.
 - **Player UI**: onError 발생 시 코드별 한국어 메시지 + "다시 시도" 버튼(`loadVideoById` 재시도) 배너를 띄우고, 정상 재생(`PLAYING`) 시 배너를 지운다.
 - **Controller UI**: `state.playbackError` 가 있으면 now-playing 근처에 "⚠ Player 재생 오류 (코드 {code})" 경고를 표시한다.
 
@@ -356,7 +359,7 @@ activity `gain`(detail `{videoId, gain}`)을 남긴 뒤 브로드캐스트한다
 | `updateSettings` | X | O |
 | `enqueueTrack` | X | O |
 | `removeQueued` | X | O |
-| `nextTrack` | X | O |
+| `nextTrack` | **O** | O |
 | `trackEnded` | **O** | X |
 | `seekTo` | X | O |
 | `progress` | **O** | X |

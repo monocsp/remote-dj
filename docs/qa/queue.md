@@ -85,12 +85,21 @@ SPEC: §재생 큐 — 큐가 비어있으면 `isPlaying:false`.
 - **When** Player가 `trackEnded {}`
 - **Then** ack `{ ok: true }`; `state.isPlaying === false`
 
-## QUEUE-11 — 큐 제어는 Controller 전용
-SPEC: §권한 — `enqueueTrack`/`removeQueued`/`nextTrack` 은 controller만.
+## QUEUE-11 — enqueue/removeQueued는 Controller 전용 (nextTrack은 Player도 허용)
+SPEC: §권한 — `enqueueTrack`/`removeQueued` 은 controller만. **`nextTrack` 은 Controller 또는 Player**.
 
 - **Given** Player가 입장한 방
-- **When** Player가 `enqueueTrack` 또는 `nextTrack` 발행
+- **When** Player가 `enqueueTrack` 발행
 - **Then** ack `{ ok: false }` (`controllers only`)
+- **When** Player가 `nextTrack` 발행
+- **Then** ack `{ ok: true }`(허용; 빈 큐면 no-op)
+
+## NEXT-PLAYER — Player의 "다음 곡"은 큐를 진행한다
+SPEC: §재생 큐/§권한 — `nextTrack` 은 Player도 발행 가능(컨트롤러/익명 검사 생략, 입장한 방 사용).
+
+- **Given** Player + Controller가 같은 방, 현재 곡 A 재생 중 + 큐에 `id === '9bZkp7q19f0'`(B) 1곡
+- **When** Player가 `nextTrack {}`
+- **Then** ack `{ ok: true }`; `state.currentTrack.id === '9bZkp7q19f0'`, `queue.length === 0`
 
 ## QUEUE-12 — trackEnded는 Player 전용
 SPEC: §재생 큐/§권한 — `trackEnded` 는 player만.

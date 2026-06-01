@@ -434,13 +434,35 @@ def test_QUEUE_09_track_ended_advances(make_client):
     assert skips and skips[-1].get("detail", {}).get("auto") is True
 
 
-# ── QUEUE-11: queue control (enqueue/nextTrack) is controllers only ─────────
-def test_QUEUE_11_queue_control_controllers_only(make_client):
+# ── QUEUE-11: enqueue is controllers only (nextTrack is allowed for Player) ──
+def test_QUEUE_11_enqueue_controllers_only(make_client):
     p = make_client()
     room = room_code()
     assert p.join(room, role="player")["ok"] is True
     assert p.call(ENQUEUE_TRACK, {"url": VALID_URL})["ok"] is False
-    assert p.call(NEXT_TRACK, {})["ok"] is False
+    # nextTrack is now allowed for the Player too (empty queue → ok no-op).
+    assert p.call(NEXT_TRACK, {})["ok"] is True
+
+
+# ── NEXT-PLAYER: a Player may press "다음 곡" and advance the queue ──────────
+def test_NEXT_PLAYER_player_can_advance(make_client):
+    controller = make_client()
+    player = make_client()
+    room = room_code()
+    controller.join(room)
+    player.join(room, role="player")
+    # A becomes current (auto-start); B then queues behind it.
+    assert controller.call(ENQUEUE_TRACK, {"url": VALID_URL})["ok"] is True
+    player.wait_for_state(lambda s: (s.get("currentTrack") or {}).get("id") == VALID_ID)
+    assert controller.call(ENQUEUE_TRACK, {"url": SECOND_URL})["ok"] is True
+    player.wait_for_state(lambda s: any(t["id"] == SECOND_ID for t in s.get("queue", [])))
+    player.states.clear()
+    ack = player.call(NEXT_TRACK, {})
+    assert ack["ok"] is True
+    st = player.wait_for_state(lambda s: (s.get("currentTrack") or {}).get("id") == SECOND_ID)
+    assert st is not None
+    assert st["currentTrack"]["id"] == SECOND_ID
+    assert len(st["queue"]) == 0
 
 
 # ── QUEUE-12: trackEnded is player only (controller rejected) ───────────────
@@ -580,37 +602,57 @@ def test_SET_04_anon_set_volume_not_gated(make_client):
     assert c.last_state()["volume"] == 42
 
 
-# ── ERR-01: a Player's playbackError sets broadcast state.playbackError.code ─
-def test_ERR_01_playback_error_sets_state(make_client):
+# NOTE: the changeTrack/enqueue embeddability reject path ('embed disabled') is
+# NOT black-box testable here — the spawned server runs with REMOTE_DJ_FAKE_TITLE
+# set, so defaultResolveEmbeddable always returns true (fail-open, no network).
+# That path is covered by the vitest EMB-01 integration test.
+
+
+# ── ERR-01: a Player's playbackError auto-skips to the next track + logs error ─
+def test_ERR_01_playback_error_auto_skips(make_client):
     controller = make_client()
     player = make_client()
     room = room_code()
     controller.join(room)
     player.join(room, role="player")
+    # A becomes current; B queues behind it → queue = [B].
+    assert controller.call(CHANGE_TRACK, {"url": VALID_URL, "reason": "A"})["ok"] is True
+    player.wait_for_state(lambda s: (s.get("currentTrack") or {}).get("id") == VALID_ID)
+    assert controller.call(ENQUEUE_TRACK, {"url": SECOND_URL})["ok"] is True
+    player.wait_for_state(lambda s: any(t["id"] == SECOND_ID for t in s.get("queue", [])))
     controller.states.clear()
-    ack = player.call(PLAYBACK_ERROR, {"code": 100})
+    controller.activities.clear()
+    # The bad current track errors → server auto-skips to B and logs an 'error'.
+    ack = player.call(PLAYBACK_ERROR, {"code": 150})
     assert ack["ok"] is True
-    controller.wait_event(3.0)
-    st = controller.last_state()
+    st = controller.wait_for_state(lambda s: (s.get("currentTrack") or {}).get("id") == SECOND_ID)
     assert st is not None
-    assert st["playbackError"]["code"] == 100
+    assert st["currentTrack"]["id"] == SECOND_ID
+    errors = [a for a in controller.activities if a["type"] == "error"]
+    assert errors and errors[-1].get("detail", {}).get("code") == 150
 
 
-# ── ERR-02: a subsequent changeTrack clears playbackError to null ───────────
-def test_ERR_02_change_track_clears_playback_error(make_client):
+# ── ERR-02: a playbackError with an empty queue stops and keeps the error ────
+def test_ERR_02_playback_error_empty_queue_stops(make_client):
     controller = make_client()
     player = make_client()
     room = room_code()
     controller.join(room)
     player.join(room, role="player")
-    assert player.call(PLAYBACK_ERROR, {"code": 100})["ok"] is True
+    # A becomes current with an empty queue.
+    assert controller.call(CHANGE_TRACK, {"url": VALID_URL, "reason": "A"})["ok"] is True
+    player.wait_for_state(lambda s: (s.get("currentTrack") or {}).get("id") == VALID_ID)
     controller.states.clear()
-    assert controller.call(CHANGE_TRACK, {"url": VALID_URL, "reason": "recover"})["ok"] is True
-    controller.wait_event(3.0)
-    st = controller.last_state()
+    controller.activities.clear()
+    ack = player.call(PLAYBACK_ERROR, {"code": 2})
+    assert ack["ok"] is True
+    st = controller.wait_for_state(
+        lambda s: s.get("isPlaying") is False and (s.get("playbackError") or {}).get("code") == 2
+    )
     assert st is not None
-    assert st["currentTrack"]["id"] == VALID_ID
-    assert st["playbackError"] is None
+    assert st["isPlaying"] is False
+    assert st["playbackError"]["code"] == 2
+    assert any(a["type"] == "error" for a in controller.activities)
 
 
 # ── ERR-03: playbackError is player only (controller rejected) ──────────────

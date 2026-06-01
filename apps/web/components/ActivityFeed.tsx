@@ -15,6 +15,7 @@ const TYPE_LABEL: Record<ActivityType, string> = {
   gain: '음량 보정',
   mode: '재생 모드',
   schedule: '예약',
+  error: '재생 오류',
 };
 
 function relativeTime(ts: number): string {
