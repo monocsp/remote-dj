@@ -930,21 +930,17 @@ describe('remote-dj server', () => {
         reason: 'manual wins',
       })) as Ack;
       expect(ack.ok).toBe(true);
-      await advanced;
+      const changed = await advanced;
+      // The changeTrack broadcast still carries the manual gain (auto-seed skips
+      // an already-set videoId).
+      expect(changed.trackGain.dQw4w9WgXcQ).toBe(0.8);
 
-      // Give any fire-and-forget auto-seed a beat to (not) run, then assert
-      // the manual value is unchanged.
-      await new Promise<void>((resolve) => setTimeout(resolve, 100));
-      const rec = await controller.emitWithAck(C2S.SetTrackGain, {
-        videoId: 'unused0only0',
-        gain: 1,
-      });
-      expect((rec as Ack).ok).toBe(true);
-      const latest = await waitFor<RoomState>(
-        controller,
-        S2C.State,
-        (s) => s.trackGain.unused0only0 !== undefined,
-      );
+      // Let the fire-and-forget auto-seed run, then probe a fresh broadcast
+      // (setVolume always broadcasts) and confirm the manual gain is untouched.
+      await new Promise<void>((resolve) => setTimeout(resolve, 200));
+      const probe = waitFor<RoomState>(controller, S2C.State, (s) => s.volume === 33);
+      await controller.emitWithAck(C2S.SetVolume, { volume: 33 });
+      const latest = await probe;
       expect(latest.trackGain.dQw4w9WgXcQ).toBe(0.8);
     } finally {
       for (const c of localClients) c.disconnect();

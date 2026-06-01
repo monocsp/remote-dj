@@ -8,6 +8,7 @@ import {
   useIsPlaying,
   useLastError,
   useLastSeek,
+  useTrackGain,
   useVolume,
 } from '@/lib/roomStore';
 import { useSearchParams } from 'next/navigation';
@@ -88,6 +89,7 @@ function PlayerInner() {
   const currentTrack = useCurrentTrack();
   const stateIsPlaying = useIsPlaying();
   const stateVolume = useVolume();
+  const trackGain = useTrackGain();
   const lastSeek = useLastSeek();
 
   // Latest local YouTube playback error code (null = no current error).
@@ -156,6 +158,8 @@ function PlayerInner() {
   const trackId = currentTrack?.id ?? null;
   const isPlaying = stateIsPlaying;
   const volume = stateVolume;
+  // Per-track loudness gain (absent ⇒ 1.0); attenuates the applied volume.
+  const gain = currentTrack ? (trackGain[currentTrack.id] ?? 1) : 1;
 
   useEffect(() => {
     if (!playerRef.current || !readyRef.current || !trackId) return;
@@ -171,8 +175,9 @@ function PlayerInner() {
 
   useEffect(() => {
     if (!playerRef.current || !readyRef.current) return;
-    playerRef.current.setVolume(volume);
-  }, [volume]);
+    const effective = Math.max(0, Math.min(100, Math.round(volume * gain)));
+    playerRef.current.setVolume(effective);
+  }, [volume, gain]);
 
   // Report playback progress (~every 2s) while a track is loaded and ready.
   useEffect(() => {

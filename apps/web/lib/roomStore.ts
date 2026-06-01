@@ -40,6 +40,9 @@ const DISCONNECTED_ACK: Ack = { ok: false, error: 'not connected' };
 // selector triggers React's "getServerSnapshot should be cached" infinite loop.
 const EMPTY_QUEUE: Track[] = [];
 
+// Stable empty-object reference for the trackGain selector (see EMPTY_QUEUE note).
+const EMPTY_GAIN: Record<string, number> = {};
+
 // ── Module-level single socket + ref counter ───────────────────────────────
 let socket: Socket | null = null;
 let refs = 0;
@@ -139,6 +142,10 @@ export const actions = {
     if (!socket) return Promise.resolve(DISCONNECTED_ACK);
     return socket.emitWithAck(C2S.PlaybackError, { code });
   },
+  setTrackGain(videoId: string, gain: number, reason?: string): Promise<Ack> {
+    if (!socket) return Promise.resolve(DISCONNECTED_ACK);
+    return socket.emitWithAck(C2S.SetTrackGain, { videoId, gain, reason });
+  },
 } as const;
 
 // ── Fine-grained selector hooks ──────────────────────────────────────────────
@@ -149,6 +156,8 @@ export const useCurrentTrack = () => useStore(store, (s) => s.state?.currentTrac
 export const useIsPlaying = () => useStore(store, (s) => s.state?.isPlaying ?? false);
 export const useVolume = () => useStore(store, (s) => s.state?.volume ?? 100);
 export const useQueue = () => useStore(store, (s) => s.state?.queue ?? EMPTY_QUEUE);
+// Stable ref (EMPTY_GAIN) so the empty case doesn't churn useSyncExternalStore.
+export const useTrackGain = () => useStore(store, (s) => s.state?.trackGain ?? EMPTY_GAIN);
 // Returns the stored nullable object reference directly — stable until the
 // server pushes a new RoomState — so it's safe for useSyncExternalStore.
 export const useSettings = () => useStore(store, (s) => s.state?.settings ?? null);

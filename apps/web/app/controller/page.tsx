@@ -15,6 +15,7 @@ import {
   useProgress,
   useQueue,
   useSettings,
+  useTrackGain,
   useVolume,
 } from '@/lib/roomStore';
 import { useSearchParams } from 'next/navigation';
@@ -50,6 +51,7 @@ function ControllerInner() {
   const queue = useQueue();
   const settings = useSettings();
   const stateVolume = useVolume();
+  const trackGain = useTrackGain();
   const progress = useProgress();
   const playbackError = usePlaybackError();
 
@@ -58,6 +60,14 @@ function ControllerInner() {
   useEffect(() => {
     setVol(stateVolume);
   }, [stateVolume]);
+
+  // Optimistic mirror of the current track's loudness gain (percent), synced to
+  // authoritative state; only meaningful when a track is loaded.
+  const [gainPct, setGainPct] = useState(100);
+  const curGain = track ? Math.round((trackGain[track.id] ?? 1) * 100) : 100;
+  useEffect(() => {
+    setGainPct(curGain);
+  }, [curGain]);
 
   // Local mirror of the seek bar; synced to the latest player-reported position.
   const [seekPos, setSeekPos] = useState(0);
@@ -231,6 +241,26 @@ function ControllerInner() {
             className="range-touch w-full accent-emerald-500"
           />
         </div>
+        {track && (
+          <div>
+            <div className="mb-2 flex items-center justify-between text-sm">
+              <span className="text-neutral-300">이 곡 음량 보정</span>
+              <span className="font-mono text-neutral-400">보정 {gainPct}%</span>
+            </div>
+            <input
+              type="range"
+              min={20}
+              max={100}
+              step={5}
+              value={gainPct}
+              onChange={(e) => setGainPct(Number(e.target.value))}
+              onPointerUp={() => void actions.setTrackGain(track.id, gainPct / 100)}
+              onKeyUp={() => void actions.setTrackGain(track.id, gainPct / 100)}
+              className="range-touch w-full accent-emerald-500"
+            />
+            <p className="mt-1 text-xs text-neutral-500">100% = 원본, 낮출수록 이 곡만 작게</p>
+          </div>
+        )}
         <button
           type="button"
           onClick={() => void actions.togglePlay(!isPlaying)}
