@@ -123,6 +123,7 @@ interface ActivityEntry {
 | `trackEnded` | **Player 전용** | 없음 | 플레이어가 현재 곡 종료를 보고. 자동 next처럼 동작 — 큐 있으면 승격(activity `skip`, detail `{auto:true}`), 비어있으면 `isPlaying:false` |
 
 - **사유 정책**: `enqueueTrack` / `nextTrack` / `trackEnded` 의 사유는 **선택**이다(비면 `reason: null` 로 기록). 반면 **`changeTrack` 은 사유 필수**(`validateReason`)이며, `currentTrack` 만 설정하고 **큐를 건드리지 않는다** — 큐 모델과 독립적이다.
+- **제목 자동 채움(YouTube oEmbed)**: `changeTrack` / `enqueueTrack` 에서 `title` 이 생략되면(빈/미지정) 서버는 먼저 `title: null` 로 즉시 적용·브로드캐스트(스내피한 ack/broadcast 유지)한 뒤, **비동기**로 YouTube oEmbed(`https://www.youtube.com/oembed?url=...&format=json`, 3s 타임아웃)에서 제목을 best-effort 로 조회한다. 성공 시 해당 곡(아직 `title` 이 비어있는 `currentTrack`/큐 항목)에 제목을 채우고 **재브로드캐스트**한다. 실패/타임아웃/오류 시 `null` 로 두며 절대 곡 변경을 막지 않는다(fire-and-forget). 이미 제공된 non-null `title` 은 덮어쓰지 않는다.
 - **`trackEnded` 는 Player 전용**이다: controller가 발행하면 ack `{ ok:false, error:'player only' }`. 그 외 큐 제어 이벤트는 모두 Controller 전용이다.
 - 신규 방은 `queue: []` 로 시작한다.
 

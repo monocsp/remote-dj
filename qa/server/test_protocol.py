@@ -162,6 +162,20 @@ def test_TRK_03_04_valid_change(make_client):
     assert track_acts and track_acts[-1]["reason"] is not None
 
 
+# ── TITLE-01: server fills currentTrack.title from YouTube oEmbed (async) ───
+def test_TITLE_01_title_autofill(make_client):
+    c = make_client()
+    room = room_code()
+    c.join(room)
+    c.states.clear()
+    # No title provided: the server fills it asynchronously and re-broadcasts.
+    ack = c.call(CHANGE_TRACK, {"url": VALID_URL, "reason": "분위기"})
+    assert ack["ok"] is True
+    st = c.wait_for_state(lambda s: (s.get("currentTrack") or {}).get("title") == "QA Title")
+    assert st is not None
+    assert st["currentTrack"]["title"] == "QA Title"
+
+
 # ── VOL-01/02/03: volume clamp + round ─────────────────────────────────────
 @pytest.mark.parametrize("raw,expected", [(150, 100), (-20, 0), (42.6, 43)])
 def test_VOL_clamp(make_client, raw, expected):

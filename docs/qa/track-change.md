@@ -55,3 +55,18 @@ SPEC: §검증 — `withinLimit` url 2048 / reason 500 / title 200.
 - **Given** 방의 controller
 - **When** url 2049자 또는 reason 501자 또는 title 201자
 - **Then** ack `{ ok: false }` (`input too long` 류), 상태 불변
+
+## TITLE-01 — 제목 없는 곡 변경은 서버가 YouTube oEmbed로 비동기 채움
+SPEC: §재생 큐 — 제목 자동 채움(best-effort, 비차단, fire-and-forget).
+
+- **Given** 방에 입장한 controller (테스트에선 결정적 리졸버/`REMOTE_DJ_FAKE_TITLE` 사용)
+- **When** title 없이 유효 `changeTrack`
+- **Then** ack `{ ok: true }` 는 즉시 반환되고(차단 없음), 이후 `state` 재브로드캐스트에서
+  `currentTrack.title` 이 리졸버가 돌려준 제목으로 채워진다(초기 브로드캐스트는 `title: null` 일 수 있음 — predicate 로 대기)
+
+## TITLE-02 — 명시된 제목은 자동 채움이 덮어쓰지 않음
+SPEC: §재생 큐 — 이미 non-null 인 `title` 은 enrich 가 건드리지 않음.
+
+- **Given** 방에 입장한 controller
+- **When** title `'My Title'` 을 명시한 유효 `changeTrack`
+- **Then** `currentTrack.title === 'My Title'` 로 유지(자동 채움이 스킵됨)

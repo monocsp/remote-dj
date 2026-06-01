@@ -41,11 +41,42 @@ type AckFn = (res: Ack) => void;
 /** Grace period before an empty room is deleted, allowing quick reconnects. */
 const ROOM_TTL_MS = 5 * 60_000;
 
+/** Timeout for the YouTube oEmbed title lookup. */
+const TITLE_FETCH_TIMEOUT_MS = 3_000;
+
+/**
+ * Best-effort resolver for a YouTube track title via the public oEmbed endpoint.
+ * Never throws: returns the title string on success, or null on any
+ * error/timeout/non-ok response. When REMOTE_DJ_FAKE_TITLE is set, returns it
+ * without any network access (deterministic tests / black-box QA).
+ */
+export async function defaultResolveTitle(url: string): Promise<string | null> {
+  const fake = process.env.REMOTE_DJ_FAKE_TITLE;
+  if (fake) return fake;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TITLE_FETCH_TIMEOUT_MS);
+  try {
+    const oembed = `https://www.youtube.com/oembed?url=${encodeURIComponent(url)}&format=json`;
+    const res = await fetch(oembed, { signal: controller.signal });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { title?: unknown };
+    return typeof data.title === 'string' ? data.title : null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
  * Wire an HTTP server + Socket.IO Server with all room handlers.
  * Exported (not auto-listening) so tests can listen on an ephemeral port.
  */
-export function createServer(store: RoomStore = new InMemoryRoomStore()): {
+export function createServer(
+  store: RoomStore = new InMemoryRoomStore(),
+  resolveTitle: (url: string) => Promise<string | null> = defaultResolveTitle,
+): {
   httpServer: HttpServer;
   io: Server;
 } {
@@ -94,6 +125,37 @@ export function createServer(store: RoomStore = new InMemoryRoomStore()): {
       presence: { playerConnected, controllers },
     };
     io.to(roomCode).emit(S2C.State, state);
+  }
+
+  /**
+   * Resolve a track's title (best-effort) and, if found, patch it onto the
+   * matching currentTrack / queue items that still lack a title, then
+   * re-broadcast. Fire-and-forget from the handlers so the original
+   * ack/broadcast is never delayed. Never throws.
+   */
+  async function enrichTitle(roomCode: string, url: string, id: string): Promise<void> {
+    const title = await resolveTitle(url);
+    if (!title) return;
+    const rec = await store.get(roomCode);
+    if (!rec) return;
+
+    let changed = false;
+    let currentTrack = rec.state.currentTrack;
+    if (currentTrack && currentTrack.id === id && !currentTrack.title) {
+      currentTrack = { ...currentTrack, title };
+      changed = true;
+    }
+    const queue = rec.state.queue.map((t) => {
+      if (t.id === id && !t.title) {
+        changed = true;
+        return { ...t, title };
+      }
+      return t;
+    });
+
+    if (!changed) return;
+    await store.patchState(roomCode, { currentTrack, queue });
+    await broadcastState(roomCode);
   }
 
   io.on('connection', (socket) => {
@@ -266,6 +328,9 @@ export function createServer(store: RoomStore = new InMemoryRoomStore()): {
       await recordActivity('track_change', reason.trim(), { id, url, title: track.title });
       ack({ ok: true });
       await broadcastState(room);
+      // No title provided: fill it from YouTube oEmbed asynchronously and
+      // re-broadcast. Fire-and-forget so ack/broadcast timing is unchanged.
+      if (!track.title) void enrichTitle(room, url, id);
     });
 
     socket.on(C2S.SetVolume, async (payload: SetVolumePayload, ack: AckFn) => {
@@ -348,6 +413,9 @@ export function createServer(store: RoomStore = new InMemoryRoomStore()): {
       await recordActivity('enqueue', reason?.trim() || null, { id, url, title: track.title });
       ack({ ok: true });
       await broadcastState(room);
+      // No title provided: fill it from YouTube oEmbed asynchronously and
+      // re-broadcast. Fire-and-forget so ack/broadcast timing is unchanged.
+      if (!track.title) void enrichTitle(room, url, id);
     });
 
     socket.on(C2S.RemoveQueued, async (payload: RemoveQueuedPayload, ack: AckFn) => {

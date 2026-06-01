@@ -37,7 +37,9 @@ describe('remote-dj server', () => {
   }
 
   beforeEach(async () => {
-    ({ io, httpServer } = createServer());
+    // Stub the title resolver so tests never hit the network and are
+    // deterministic (keep the default in-memory store).
+    ({ io, httpServer } = createServer(undefined, async () => 'Stub Title'));
     await new Promise<void>((resolve) => {
       httpServer.listen(0, '127.0.0.1', () => resolve());
     });
@@ -712,6 +714,49 @@ describe('remote-dj server', () => {
 
     const ack = (await player.emitWithAck(C2S.PlaybackError, { code: 'x' })) as Ack;
     expect(ack.ok).toBe(false);
+  });
+
+  it('TITLE-01 fills currentTrack.title from the resolver when no title is given', async () => {
+    const room = 'TITLE1';
+    const controller = connect();
+    await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+
+    // The first state (from the ack/broadcast) may carry title null; the
+    // predicate waits for the enriched re-broadcast.
+    const enriched = waitFor<RoomState>(
+      controller,
+      S2C.State,
+      (s) => s.currentTrack?.title === 'Stub Title',
+    );
+    const ack = (await controller.emitWithAck(C2S.ChangeTrack, {
+      url: VALID_URL,
+      reason: 'set the vibe',
+    })) as Ack;
+    expect(ack.ok).toBe(true);
+
+    const s = await enriched;
+    expect(s.currentTrack?.title).toBe('Stub Title');
+  });
+
+  it('TITLE-02 does not overwrite an explicitly provided title', async () => {
+    const room = 'TITLE2';
+    const controller = connect();
+    await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+
+    const hasTrack = waitFor<RoomState>(
+      controller,
+      S2C.State,
+      (s) => s.currentTrack?.id === 'dQw4w9WgXcQ',
+    );
+    const ack = (await controller.emitWithAck(C2S.ChangeTrack, {
+      url: VALID_URL,
+      reason: 'set the vibe',
+      title: 'My Title',
+    })) as Ack;
+    expect(ack.ok).toBe(true);
+
+    const s = await hasTrack;
+    expect(s.currentTrack?.title).toBe('My Title');
   });
 
   it('SEC-01 never leaks the room password into any broadcast state', async () => {

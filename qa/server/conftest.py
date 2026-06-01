@@ -53,7 +53,13 @@ def server_url() -> str:
     port = int(os.environ.get("REMOTE_DJ_TEST_PORT", "3099"))
     base = f"http://localhost:{port}"
 
-    env = {**os.environ, "PORT": str(port), "HOSTNAME": "127.0.0.1"}
+    env = {
+        **os.environ,
+        "PORT": str(port),
+        "HOSTNAME": "127.0.0.1",
+        # Deterministic title for the black-box server (no network).
+        "REMOTE_DJ_FAKE_TITLE": "QA Title",
+    }
     # Prefer the workspace dev:server script; fall back to direct tsx run.
     cmd = ["npm", "run", "dev:server"]
     proc = subprocess.Popen(
