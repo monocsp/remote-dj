@@ -61,7 +61,7 @@ type Role = 'player' | 'controller';
 | `setTrackGain` | C→S | `{ videoId: string; gain: number; reason?: string }` | **Controller 전용**. `videoId` 가 비어있지 않은 문자열이 아니면 `{ ok:false, error:'invalid videoId' }`. `clampGain(gain)` 으로 `[0.2, 1.0]` 보정 후 `trackGain[videoId]` 에 설정, activity `gain`, detail `{videoId, gain}`, 브로드캐스트. **사유 선택** |
 | `setRepeat` | C→S | `{ mode: 'off'\|'one'\|'all'; reason?: string }` | **Controller 전용**. `mode` 가 `off`/`one`/`all` 이 아니면 `{ ok:false, error:'invalid mode' }`. `repeat` 갱신, activity `mode`, detail `{repeat}`, 브로드캐스트. **사유 선택** |
 | `setShuffle` | C→S | `{ shuffle: boolean; reason?: string }` | **Controller 전용**. `shuffle` 를 boolean 으로 강제. `shuffle` 갱신, activity `mode`, detail `{shuffle}`, 브로드캐스트. **사유 선택** |
-| `setSchedule` | C→S | `{ schedule: WeeklySchedule \| null; reason?: string }` | **Controller 전용**. `schedule` 가 `null` 이면 예약 해제. 아니면 검증(`enabled` boolean, 7개 요일 키, 각 `on` boolean + `isHHMM(start)`/`isHHMM(end)` + `start < end`) — 실패 시 `{ ok:false, error:'invalid schedule' }`. `schedule` 갱신, activity `schedule`(detail `{enabled}`), 브로드캐스트. **사유 선택** |
+| `setSchedule` | C→S | `{ schedule: WeeklySchedule \| null; reason?: string }` | **Player 전용**(예약은 디바이스/운영 설정 — controller가 발행 시 `{ ok:false, error:'player only' }`). `schedule` 가 `null` 이면 예약 해제. 아니면 검증(`enabled` boolean, 7개 요일 키, 각 `on` boolean + `isHHMM(start)`/`isHHMM(end)` + `start < end`) — 실패 시 `{ ok:false, error:'invalid schedule' }`. `schedule` 갱신, activity `schedule`(detail `{enabled}`), 브로드캐스트. **사유 선택** |
 | `state` | S→C | `RoomState` | join 직후 + 모든 변경 후 브로드캐스트 |
 | `activity` | S→C | `ActivityEntry` | 신규 항목 1건 |
 | `activityLog` | S→C | `ActivityEntry[]` | join 직후 전체 로그 |
@@ -244,9 +244,11 @@ activity `gain`(detail `{videoId, gain}`)을 남긴 뒤 브로드캐스트한다
 요일별로 `on` 여부와 `start`/`end` 시각("HH:MM", 24h)을 지정하면, 서버가 그 시간대에 맞춰
 **자동으로 재생을 시작/종료**한다. 시각은 모두 **서버 로컬 타임존** 기준이다.
 
+예약은 **Player가 설정한다**(디바이스/운영 설정). Controller는 사운드/음악 제어 전용이며 예약 UI를 갖지 않는다.
+
 | 동작 | 발행자 | 사유 | 효과 |
 | --- | --- | --- | --- |
-| `setSchedule` | **Controller 전용** | **선택** | `schedule`(또는 `null`로 해제)을 검증·저장. activity `schedule`(detail `{enabled}`), 브로드캐스트 |
+| `setSchedule` | **Player 전용** | **선택** | `schedule`(또는 `null`로 해제)을 검증·저장. activity `schedule`(detail `{enabled}`), 브로드캐스트 |
 
 - **검증**(`schedule != null` 일 때): `enabled` boolean, `days` 에 7개 요일 키(`mon`..`sun`) 모두 존재,
   각 `day.on` boolean + `isHHMM(start)` + `isHHMM(end)` + `start < end`. 하나라도 위반하면
@@ -362,7 +364,7 @@ activity `gain`(detail `{videoId, gain}`)을 남긴 뒤 브로드캐스트한다
 | `setTrackGain` | X | O |
 | `setRepeat` | X | O |
 | `setShuffle` | X | O |
-| `setSchedule` | X | O |
+| `setSchedule` | **O** | X |
 
 ## 비범위 (추후)
 

@@ -1218,19 +1218,19 @@ describe('remote-dj server', () => {
     return { enabled: true, days };
   }
 
-  it('SCHED-01 setSchedule broadcasts state.schedule + logs a schedule activity', async () => {
+  it('SCHED-01 a player setSchedule broadcasts state.schedule + logs a schedule activity', async () => {
     const room = 'SCHED1';
-    const controller = connect();
+    const player = connect();
     const observer = connect();
-    await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
-    await observer.emitWithAck(C2S.Join, { roomCode: room, role: 'player' });
+    await player.emitWithAck(C2S.Join, { roomCode: room, role: 'player' });
+    await observer.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
 
     const enabled = (s: RoomState) => s.schedule?.enabled === true;
     const isSchedule = (a: ActivityEntry) => a.type === 'schedule';
     const obsState = waitFor<RoomState>(observer, S2C.State, enabled);
     const obsActivity = waitFor<ActivityEntry>(observer, S2C.Activity, isSchedule);
 
-    const ack = (await controller.emitWithAck(C2S.SetSchedule, {
+    const ack = (await player.emitWithAck(C2S.SetSchedule, {
       schedule: monSchedule(),
     })) as Ack;
     expect(ack.ok).toBe(true);
@@ -1240,14 +1240,14 @@ describe('remote-dj server', () => {
     expect(oa.type).toBe('schedule');
   });
 
-  it('SCHED-02 rejects a schedule with start>end or bad HH:MM', async () => {
+  it('SCHED-02 rejects an invalid schedule from a player (start>end or bad HH:MM)', async () => {
     const room = 'SCHED2';
-    const controller = connect();
-    await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+    const player = connect();
+    await player.emitWithAck(C2S.Join, { roomCode: room, role: 'player' });
 
     const badRange = monSchedule();
     badRange.days.mon = { on: true, start: '18:00', end: '09:00' };
-    const rangeAck = (await controller.emitWithAck(C2S.SetSchedule, {
+    const rangeAck = (await player.emitWithAck(C2S.SetSchedule, {
       schedule: badRange,
     })) as Ack;
     expect(rangeAck.ok).toBe(false);
@@ -1255,19 +1255,34 @@ describe('remote-dj server', () => {
 
     const badTime = monSchedule();
     badTime.days.mon = { on: true, start: '09:00', end: '25:99' };
-    const timeAck = (await controller.emitWithAck(C2S.SetSchedule, {
+    const timeAck = (await player.emitWithAck(C2S.SetSchedule, {
       schedule: badTime,
     })) as Ack;
     expect(timeAck.ok).toBe(false);
     expect(timeAck.error).toBe('invalid schedule');
   });
 
-  it('SCHED-03 auto-starts playback on the schedule edge inside the window', async () => {
-    const room = 'SCHED3';
+  it('SCHED-06 rejects setSchedule from a controller (player-only)', async () => {
+    const room = 'SCHED6';
     const controller = connect();
     await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
 
-    await controller.emitWithAck(C2S.SetSchedule, { schedule: monSchedule() });
+    const ack = (await controller.emitWithAck(C2S.SetSchedule, {
+      schedule: monSchedule(),
+    })) as Ack;
+    expect(ack.ok).toBe(false);
+    expect(ack.error).toBe('player only');
+  });
+
+  it('SCHED-03 auto-starts playback on the schedule edge inside the window', async () => {
+    const room = 'SCHED3';
+    const controller = connect();
+    const player = connect();
+    await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+    await player.emitWithAck(C2S.Join, { roomCode: room, role: 'player' });
+
+    // Schedule is a player (device) setting; track/playback control is controller.
+    await player.emitWithAck(C2S.SetSchedule, { schedule: monSchedule() });
     const hasTrack = waitFor<RoomState>(
       controller,
       S2C.State,
@@ -1287,9 +1302,11 @@ describe('remote-dj server', () => {
   it('SCHED-04 auto-stops playback on the schedule edge outside the window', async () => {
     const room = 'SCHED4';
     const controller = connect();
+    const player = connect();
     await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+    await player.emitWithAck(C2S.Join, { roomCode: room, role: 'player' });
 
-    await controller.emitWithAck(C2S.SetSchedule, { schedule: monSchedule() });
+    await player.emitWithAck(C2S.SetSchedule, { schedule: monSchedule() });
     const playing = waitFor<RoomState>(controller, S2C.State, (s) => s.isPlaying === true);
     await controller.emitWithAck(C2S.ChangeTrack, { url: VALID_URL, reason: 'A' });
     await playing;
@@ -1303,9 +1320,11 @@ describe('remote-dj server', () => {
   it('SCHED-05 does not fight a manual pause mid-window (edge-triggered)', async () => {
     const room = 'SCHED5';
     const controller = connect();
+    const player = connect();
     await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+    await player.emitWithAck(C2S.Join, { roomCode: room, role: 'player' });
 
-    await controller.emitWithAck(C2S.SetSchedule, { schedule: monSchedule() });
+    await player.emitWithAck(C2S.SetSchedule, { schedule: monSchedule() });
     const hasTrack = waitFor<RoomState>(
       controller,
       S2C.State,

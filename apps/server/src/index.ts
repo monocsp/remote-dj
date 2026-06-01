@@ -922,7 +922,7 @@ export function createServer(
     });
 
     socket.on(C2S.SetSchedule, async (payload: SetSchedulePayload, ack: AckFn) => {
-      const room = requireController(ack);
+      const room = requirePlayer(ack);
       if (!room) return;
       const { schedule, reason } = payload ?? ({} as SetSchedulePayload);
       if (!withinLimit(reason, LIMITS.reason)) {

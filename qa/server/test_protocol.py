@@ -855,16 +855,16 @@ def _mon_schedule() -> dict:
     return {"enabled": True, "days": days}
 
 
-# ── SCHED-01: setSchedule broadcasts state.schedule + logs schedule activity ─
+# ── SCHED-01: a Player's setSchedule broadcasts state.schedule + logs activity ─
 def test_SCHED_01_set_schedule_broadcasts_and_logs(make_client):
-    controller = make_client()
+    player = make_client()
     observer = make_client()
     room = room_code()
-    controller.join(room)
-    observer.join(room, role="player")
+    player.join(room, role="player")
+    observer.join(room)
     observer.states.clear()
     observer.activities.clear()
-    ack = controller.call(SET_SCHEDULE, {"schedule": _mon_schedule()})
+    ack = player.call(SET_SCHEDULE, {"schedule": _mon_schedule()})
     assert ack["ok"] is True
     st = observer.wait_for_state(lambda s: (s.get("schedule") or {}).get("enabled") is True)
     assert st is not None
@@ -872,20 +872,30 @@ def test_SCHED_01_set_schedule_broadcasts_and_logs(make_client):
     assert any(a["type"] == "schedule" for a in observer.activities)
 
 
-# ── SCHED-02: invalid schedule (start>end or bad HH:MM) is rejected ─────────
+# ── SCHED-02: invalid schedule from a player (start>end or bad HH:MM) rejected ─
 def test_SCHED_02_invalid_schedule_rejected(make_client):
-    c = make_client()
+    p = make_client()
     room = room_code()
-    c.join(room)
+    p.join(room, role="player")
 
     bad_range = _mon_schedule()
     bad_range["days"]["mon"] = {"on": True, "start": "18:00", "end": "09:00"}
-    ack = c.call(SET_SCHEDULE, {"schedule": bad_range})
+    ack = p.call(SET_SCHEDULE, {"schedule": bad_range})
     assert ack["ok"] is False
     assert ack.get("error") == "invalid schedule"
 
     bad_time = _mon_schedule()
     bad_time["days"]["mon"] = {"on": True, "start": "09:00", "end": "25:99"}
-    ack2 = c.call(SET_SCHEDULE, {"schedule": bad_time})
+    ack2 = p.call(SET_SCHEDULE, {"schedule": bad_time})
     assert ack2["ok"] is False
     assert ack2.get("error") == "invalid schedule"
+
+
+# ── SCHED-06: setSchedule is player only (controller rejected) ──────────────
+def test_SCHED_06_set_schedule_player_only(make_client):
+    c = make_client()
+    room = room_code()
+    assert c.join(room)["ok"] is True
+    ack = c.call(SET_SCHEDULE, {"schedule": _mon_schedule()})
+    assert ack["ok"] is False
+    assert ack.get("error") == "player only"
