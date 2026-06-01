@@ -1,4 +1,5 @@
 import { type Server as HttpServer, createServer as createHttpServer } from 'node:http';
+import path from 'node:path';
 import {
   type Ack,
   type ActivityEntry,
@@ -33,6 +34,7 @@ import {
 } from '@remote-dj/shared';
 import { nanoid } from 'nanoid';
 import { Server } from 'socket.io';
+import { PersistentRoomStore } from './persistentStore.js';
 import { InMemoryRoomStore, type RoomStore } from './store.js';
 
 interface SocketData {
@@ -796,7 +798,10 @@ export function createServer(
 // Auto-start unless imported (e.g. by tests).
 const isMain = process.argv[1] && import.meta.url === `file://${process.argv[1]}`;
 if (isMain) {
-  const { httpServer } = createServer();
+  const dataFile =
+    process.env.REMOTE_DJ_DATA_FILE ?? path.resolve(process.cwd(), '.data', 'rooms.json');
+  console.log(`remote-dj persisting room state to ${dataFile}`);
+  const { httpServer } = createServer(new PersistentRoomStore(dataFile));
   const port = Number(process.env.PORT ?? 3001);
   const hostname = process.env.HOSTNAME ?? '0.0.0.0';
   httpServer.listen(port, hostname, () => {

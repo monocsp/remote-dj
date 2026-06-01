@@ -55,7 +55,38 @@ function createInitialState(roomCode: string): RoomState {
 }
 
 export class InMemoryRoomStore implements RoomStore {
-  private rooms = new Map<string, RoomRecord>();
+  // protected so a persistence subclass can serialize the contents.
+  protected rooms = new Map<string, RoomRecord>();
+
+  /**
+   * Hook invoked at the END of every mutating method (getOrCreate when it
+   * actually CREATES a record, patchState, appendActivity, setHistory,
+   * deleteRoom). In-memory: no-op. Subclasses override to persist.
+   */
+  protected onMutate(): void {}
+
+  /** Plain serializable snapshot of all rooms (for persistence). */
+  protected dumpRecords(): Record<string, RoomRecord> {
+    const out: Record<string, RoomRecord> = {};
+    for (const [code, record] of this.rooms) {
+      out[code] = record;
+    }
+    return out;
+  }
+
+  /**
+   * Replace the Map contents from a parsed snapshot. Defensive: only accept
+   * entries that look like a RoomRecord (have a `.state` object).
+   */
+  protected loadRecords(data: Record<string, RoomRecord>): void {
+    this.rooms.clear();
+    if (!data || typeof data !== 'object') return;
+    for (const [code, record] of Object.entries(data)) {
+      if (record && typeof record === 'object' && typeof record.state === 'object') {
+        this.rooms.set(code, record as RoomRecord);
+      }
+    }
+  }
 
   async getOrCreate(roomCode: string, initialPassword?: string | null): Promise<RoomRecord> {
     let record = this.rooms.get(roomCode);
@@ -68,6 +99,7 @@ export class InMemoryRoomStore implements RoomStore {
         history: [],
       };
       this.rooms.set(roomCode, record);
+      this.onMutate();
     }
     return record;
   }
@@ -86,6 +118,7 @@ export class InMemoryRoomStore implements RoomStore {
       updatedAt: Date.now(),
       stateVersion: record.state.stateVersion + 1,
     };
+    this.onMutate();
     return record.state;
   }
 
@@ -96,6 +129,7 @@ export class InMemoryRoomStore implements RoomStore {
     if (record.log.length > MAX_LOG) {
       record.log.splice(0, record.log.length - MAX_LOG);
     }
+    this.onMutate();
   }
 
   async setHistory(roomCode: string, history: Track[]): Promise<void> {
@@ -103,9 +137,11 @@ export class InMemoryRoomStore implements RoomStore {
     // Keep only the most recent MAX_HISTORY entries (oldest-first; drop front).
     record.history =
       history.length > MAX_HISTORY ? history.slice(history.length - MAX_HISTORY) : history;
+    this.onMutate();
   }
 
   async deleteRoom(roomCode: string): Promise<void> {
     this.rooms.delete(roomCode);
+    this.onMutate();
   }
 }
