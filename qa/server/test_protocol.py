@@ -562,3 +562,100 @@ def test_ERR_03_playback_error_player_only(make_client):
     ack = c.call(PLAYBACK_ERROR, {"code": 100})
     assert ack["ok"] is False
     assert ack.get("error") == "player only"
+
+
+# ── RT-04: presence.controllers decrements when a controller disconnects ────
+def test_RT_04_presence_decrements_on_disconnect(make_client):
+    room = room_code()
+    c1 = make_client()
+    c2 = make_client()
+    c1.join(room)
+    c2.join(room)
+    # Both controllers present.
+    st = c2.wait_for_state(lambda s: s.get("presence", {}).get("controllers") == 2)
+    assert st is not None
+    # c1 disconnects; the server recomputes presence and rebroadcasts.
+    c2.states.clear()
+    c1.close()
+    st = c2.wait_for_state(lambda s: s.get("presence", {}).get("controllers") == 1)
+    assert st is not None
+    assert st["presence"]["controllers"] == 1
+    assert st["presence"]["playerConnected"] is False
+
+
+# ── RT-06: a fresh socket joining a room resyncs to current track + log ─────
+def test_RT_06_reconnect_resync(make_client):
+    room = room_code()
+    a = make_client()
+    a.join(room)
+    assert a.call(CHANGE_TRACK, {"url": VALID_URL, "reason": "분위기"})["ok"] is True
+    # A brand-new socket joins the same room and must receive the latest state.
+    b = make_client()
+    b.join(room)
+    st = b.wait_for_state(lambda s: (s.get("currentTrack") or {}).get("id") == VALID_ID)
+    assert st is not None
+    assert st["currentTrack"]["id"] == VALID_ID
+    # The full activity log delivered on join includes the track_change.
+    b.wait_event(2.0)
+    assert b.activity_log is not None
+    assert any(e["type"] == "track_change" for e in b.activity_log)
+
+
+# ── QUEUE-13: removeQueued at index 0 drops head, keeps the rest ────────────
+def test_QUEUE_13_remove_queued_happy_path(make_client):
+    second_url = "https://youtu.be/9bZkp7q19f0"
+    second_id = "9bZkp7q19f0"
+    c = make_client()
+    room = room_code()
+    c.join(room)
+    assert c.call(ENQUEUE_TRACK, {"url": VALID_URL})["ok"] is True
+    assert c.call(ENQUEUE_TRACK, {"url": second_url})["ok"] is True
+    c.states.clear()
+    ack = c.call(REMOVE_QUEUED, {"index": 0})
+    assert ack["ok"] is True
+    st = c.wait_for_state(lambda s: len(s.get("queue", [])) == 1)
+    assert st is not None
+    assert len(st["queue"]) == 1
+    assert st["queue"][0]["id"] == second_id
+
+
+# ── SEEK-09: invalid progress payloads are rejected ─────────────────────────
+def test_SEEK_09_invalid_progress_rejected(make_client):
+    player = make_client()
+    room = room_code()
+    player.join(room, role="player")
+    # Non-number currentTime → rejected (typeof check). NaN is intentionally
+    # avoided: it is not JSON-serializable, so it can't cross the wire here —
+    # the not-finite path is covered by the vitest integration test instead.
+    type_ack = player.call(PROGRESS, {"currentTime": "x", "duration": 100})
+    assert type_ack["ok"] is False
+    # Negative currentTime.
+    neg_ack = player.call(PROGRESS, {"currentTime": -1, "duration": 100})
+    assert neg_ack["ok"] is False
+
+
+# ── ERR-04: a non-number playbackError code is rejected ─────────────────────
+def test_ERR_04_invalid_playback_error_code_rejected(make_client):
+    player = make_client()
+    room = room_code()
+    player.join(room, role="player")
+    ack = player.call(PLAYBACK_ERROR, {"code": "x"})
+    assert ack["ok"] is False
+
+
+# ── SEC-01: the room password never appears in any broadcast state ──────────
+def test_SEC_01_password_not_in_state(make_client):
+    import json as _json
+
+    room = room_code()
+    creator = make_client()
+    assert creator.join(room, password="secret")["ok"] is True
+    observer = make_client()
+    assert observer.join(room, role="player", password="secret")["ok"] is True
+    # Trigger another broadcast to exercise more than the join state.
+    assert creator.call(CHANGE_TRACK, {"url": VALID_URL, "reason": "분위기"})["ok"] is True
+    observer.wait_for_state(lambda s: (s.get("currentTrack") or {}).get("id") == VALID_ID)
+    assert observer.states  # received at least one state
+    for s in observer.states:
+        assert "password" not in s
+        assert "secret" not in _json.dumps(s)

@@ -611,4 +611,146 @@ describe('remote-dj server', () => {
     expect(ack.ok).toBe(false);
     expect(ack.error).toBe('player only');
   });
+
+  // ── GAP coverage (docs/TESTING.md §4) ───────────────────────────────────────
+
+  it('RT-04 decrements presence.controllers when a controller disconnects', async () => {
+    const room = 'RT04';
+    const controllerA = connect();
+    const controllerB = connect();
+    await controllerA.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+    await controllerB.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+
+    // After A leaves, B must receive a state with exactly one controller.
+    const dropped = waitFor<RoomState>(controllerB, S2C.State, (s) => s.presence.controllers === 1);
+    controllerA.disconnect();
+
+    const s = await dropped;
+    expect(s.presence.controllers).toBe(1);
+    expect(s.presence.playerConnected).toBe(false);
+  });
+
+  it('RT-06 a fresh socket joining a room resyncs to current track + activity log', async () => {
+    const room = 'RT06';
+    const controller = connect();
+    await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+
+    const ack = (await controller.emitWithAck(C2S.ChangeTrack, {
+      url: VALID_URL,
+      reason: 'set the vibe',
+      title: 'Never Gonna Give You Up',
+    })) as Ack;
+    expect(ack.ok).toBe(true);
+
+    // A brand-new socket joins the SAME room and must receive both the latest
+    // state (with currentTrack) and the full activity log on join.
+    const fresh = connect();
+    const freshState = waitFor<RoomState>(
+      fresh,
+      S2C.State,
+      (s) => s.currentTrack?.id === 'dQw4w9WgXcQ',
+    );
+    const freshLog = waitFor<ActivityEntry[]>(fresh, S2C.ActivityLog, (log) =>
+      log.some((e) => e.type === 'track_change'),
+    );
+
+    const joinAck = (await fresh.emitWithAck(C2S.Join, {
+      roomCode: room,
+      role: 'controller',
+    })) as Ack;
+    expect(joinAck.ok).toBe(true);
+
+    const [s, log] = await Promise.all([freshState, freshLog]);
+    expect(s.currentTrack?.id).toBe('dQw4w9WgXcQ');
+    expect(log.some((e) => e.type === 'track_change')).toBe(true);
+  });
+
+  it('QUEUE-13 removeQueued at index 0 drops the head and keeps the rest', async () => {
+    const room = 'QUEUE13';
+    const SECOND_URL = 'https://youtu.be/9bZkp7q19f0';
+    const controller = connect();
+    await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+
+    await controller.emitWithAck(C2S.EnqueueTrack, { url: VALID_URL });
+    await controller.emitWithAck(C2S.EnqueueTrack, { url: SECOND_URL });
+
+    const shrunk = waitFor<RoomState>(
+      controller,
+      S2C.State,
+      (s) => s.queue.length === 1 && s.queue[0]?.id === '9bZkp7q19f0',
+    );
+    const ack = (await controller.emitWithAck(C2S.RemoveQueued, { index: 0 })) as Ack;
+    expect(ack.ok).toBe(true);
+
+    const s = await shrunk;
+    expect(s.queue.length).toBe(1);
+    expect(s.queue[0]?.id).toBe('9bZkp7q19f0');
+  });
+
+  it('SEEK-09 rejects a progress report with non-finite or negative currentTime', async () => {
+    const room = 'SEEK09';
+    const player = connect();
+    await player.emitWithAck(C2S.Join, { roomCode: room, role: 'player' });
+
+    const nanAck = (await player.emitWithAck(C2S.Progress, {
+      currentTime: Number.NaN,
+      duration: 100,
+    })) as Ack;
+    expect(nanAck.ok).toBe(false);
+
+    const negAck = (await player.emitWithAck(C2S.Progress, {
+      currentTime: -1,
+      duration: 100,
+    })) as Ack;
+    expect(negAck.ok).toBe(false);
+  });
+
+  it('ERR-04 rejects a playbackError whose code is not a number', async () => {
+    const room = 'ERR04';
+    const player = connect();
+    await player.emitWithAck(C2S.Join, { roomCode: room, role: 'player' });
+
+    const ack = (await player.emitWithAck(C2S.PlaybackError, { code: 'x' })) as Ack;
+    expect(ack.ok).toBe(false);
+  });
+
+  it('SEC-01 never leaks the room password into any broadcast state', async () => {
+    const room = 'SEC01';
+    const creator = connect();
+    const createAck = (await creator.emitWithAck(C2S.Join, {
+      roomCode: room,
+      role: 'controller',
+      password: 'secret',
+    })) as Ack;
+    expect(createAck.ok).toBe(true);
+
+    // An observer joins with the correct password; capture every state it sees.
+    const observer = connect();
+    const seen: RoomState[] = [];
+    observer.on(S2C.State, (s: RoomState) => {
+      seen.push(s);
+    });
+
+    const joinAck = (await observer.emitWithAck(C2S.Join, {
+      roomCode: room,
+      role: 'player',
+      password: 'secret',
+    })) as Ack;
+    expect(joinAck.ok).toBe(true);
+
+    // Trigger another broadcast so we exercise more than just the join state.
+    const sawTrack = waitFor<RoomState>(
+      observer,
+      S2C.State,
+      (s) => s.currentTrack?.id === 'dQw4w9WgXcQ',
+    );
+    await creator.emitWithAck(C2S.ChangeTrack, { url: VALID_URL, reason: 'set the vibe' });
+    await sawTrack;
+
+    expect(seen.length).toBeGreaterThan(0);
+    for (const s of seen) {
+      expect(Object.keys(s)).not.toContain('password');
+      expect(JSON.stringify(s)).not.toContain('secret');
+    }
+  });
 });
