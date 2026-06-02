@@ -1,6 +1,34 @@
 # DEPLOYMENT — remote-dj 실행/배포
 
-remote-dj는 web(3000)과 server(3001) 두 프로세스로 구성된다. 둘 다 `0.0.0.0` 에 바인딩되어 같은 네트워크의 다른 기기가 접속할 수 있다. 클라이언트는 빌드 시점에 `NEXT_PUBLIC_SERVER_URL` 을 베이크하므로, 서버 주소가 바뀌면 **web을 다시 빌드** 해야 한다.
+remote-dj는 web(3000)과 server(3001) 두 프로세스로 구성된다. 둘 다 `0.0.0.0` 에 바인딩되어 같은 네트워크의 다른 기기가 접속할 수 있다. 클라이언트는 빌드 시점에 `NEXT_PUBLIC_SERVER_URL` 을 베이크하므로, 서버 주소가 바뀌면 **web을 다시 빌드** 해야 한다. (env를 안 줄 때 web은 런타임에 **같은 호스트의 `웹포트+1`** 을 서버로 잡으므로 — 3000→3001, 3100→3101 — LAN 환경에선 재빌드가 필요 없다.)
+
+## 운영 모델 — prd(상시) + dev(개발) 동시 실행
+
+main = **운영(prd)**, 브랜치 = **개발(dev)**. 한 맥에서 둘을 동시에 띄우려고 **포트·데이터·작업 디렉터리**를 분리한다. PR 머지는 prd에 자동 반영되지 않는다(CD 없음) — 릴리즈는 prd 디렉터리에서 `git pull` 후 재시작할 때만 일어난다. 데이터(`apps/server/.data*/rooms.json`)는 `.gitignore` 대상이라 pull/재빌드로 덮어쓰이지 않는다.
+
+| | prd (운영) | dev (개발) |
+| --- | --- | --- |
+| 브랜치 | `main` | feature 브랜치 |
+| 디렉터리 | `../remote-dj-prd` (git worktree) | 이 저장소 |
+| web 포트 | **3000** | **3100** |
+| server 포트 | **3001** | **3101** |
+| 데이터 파일 | `.data/rooms.json` | `.data-dev/rooms.json` |
+| 접속 주소 | `http://<맥-LAN-IP>:3000` | `http://<맥-LAN-IP>:3100` |
+| 실행 | `npm run prd:build && npm run prd` | `npm run dev:alt` |
+
+```bash
+# prd worktree 최초 1회 생성 (main 체크아웃 + 서버 .env 복사)
+git worktree add ../remote-dj-prd main
+cp apps/server/.env ../remote-dj-prd/apps/server/.env   # YOUTUBE_API_KEY 등
+cd ../remote-dj-prd && npm install && npm run prd:build && npm run prd
+
+# 이후 prd 릴리즈 (데이터 유지: .data/ 는 그대로 둠)
+cd ../remote-dj-prd && git pull && npm install && npm run prd:build
+# 그리고 prd 프로세스 재시작
+
+# dev (이 저장소에서 브랜치 작업 중)
+npm run dev:alt   # web 3100 / server 3101 / .data-dev/
+```
 
 ## 타깃 A — 컴퓨터에서 실행 (가장 쉬움)
 
