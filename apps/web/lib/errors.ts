@@ -20,3 +20,23 @@ export function koError(err?: string): string {
   if (!err) return '요청을 처리하지 못했어요';
   return ERROR_MESSAGES[err] ?? err;
 }
+
+/**
+ * Human Korean message for a YouTube IFrame playback error code (shown in the
+ * playback-error banner on both the Player and the Controller).
+ */
+export function playbackErrorMessage(code: number): string {
+  switch (code) {
+    case 2:
+      return '잘못된 영상 링크예요';
+    case 5:
+      return 'HTML5 재생 오류예요';
+    case 100:
+      return '영상을 찾을 수 없어요';
+    case 101:
+    case 150:
+      return '임베드(퍼가기)가 비활성화된 영상이라 재생할 수 없어요';
+    default:
+      return '재생 오류가 발생했어요';
+  }
+}

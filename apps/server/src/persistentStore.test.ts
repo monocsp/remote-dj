@@ -29,9 +29,10 @@ describe('PersistentRoomStore', () => {
       type: 'play',
       reason: null,
     });
-    await a.setHistory('R1', [
-      { id: 'x', url: 'u', title: null, addedBy: null, addedAt: 0, ownerId: '' },
-    ]);
+    await a.patchState('R1', {
+      playlist: [{ id: 'x', url: 'u', title: null, addedBy: null, addedAt: 0, ownerId: '' }],
+      currentIndex: 0,
+    });
     a.flush();
 
     const b = new PersistentRoomStore(file);
@@ -39,9 +40,10 @@ describe('PersistentRoomStore', () => {
     expect(record).toBeDefined();
     expect(record?.state.volume).toBe(33);
     expect(record?.log).toEqual([{ id: 'a', ts: 1, actor: null, type: 'play', reason: null }]);
-    expect(record?.history).toEqual([
+    expect(record?.state.playlist).toEqual([
       { id: 'x', url: 'u', title: null, addedBy: null, addedAt: 0, ownerId: '' },
     ]);
+    expect(record?.state.currentIndex).toBe(0);
   });
 
   it('starts empty on a missing file without throwing', async () => {

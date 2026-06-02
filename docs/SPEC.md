@@ -17,7 +17,7 @@ type Role = 'player' | 'controller';
 | 역할 | 권한 | 비고 |
 | --- | --- | --- |
 | **Player (MAIN)** | `join` + **모든 제어 이벤트** (게스트-허용 이벤트 + 메인-전용 이벤트 + 상태 보고) | YouTube 재생을 위해 YouTube 로그인 선행 필요. 메인 제어면이며 디바이스/운영 설정(예약/모드/탐색/설정)을 소유 |
-| **Controller (GUEST)** | `join` + **게스트-허용 이벤트만** (`changeTrack`/`enqueueTrack`/`setVolume`/`togglePlay`/`setTrackGain`) | 제한된 리모컨. 메인-전용 이벤트 발행 시 `{ ok:false, error:'player only' }` |
+| **Controller (GUEST)** | `join` + **게스트-허용 이벤트만** (`changeTrack`/`enqueueTrack`/`setVolume`/`togglePlay`/`setTrackGain`) + 소유권 한정 `removeQueued` | 제한된 리모컨. 메인-전용 이벤트 발행 시 `{ ok:false, error:'player only' }` |
 
 ## 화면별 명세
 
@@ -28,43 +28,44 @@ type Role = 'player' | 'controller';
 - 선택에 따라 `/player?room=CODE` 또는 `/controller?room=CODE` 로 이동
 
 ### Player `/player?room=CODE` (MAIN)
-- YouTube **IFrame Player API** 로 실제 재생
-- 서버에서 받은 `state` 를 그대로 적용(currentTrack / isPlaying / volume)
-- 참가 안내를 위해 방 코드 및 **QR**(추후) 표시
-- **메인 제어면**: 모든 제어 이벤트(게스트-허용 + 메인-전용: 다음곡/큐 제거/반복/셔플/탐색/설정/예약) 발행 가능
-  (UI 구현은 별도 단계)
+- YouTube **IFrame Player API** 로 실제 재생. 모바일 음소거 자동재생을 위해 음량 적용 시 `mute`/`unMute` 조정
+- 서버에서 받은 `state` 를 그대로 적용(playlist[currentIndex] / isPlaying / volume)
+- **단일 재생목록**: 재생함(흐릿·작게) → 현재곡(굵게·크게) → 다음 곡(작게)을 한 리스트로. **행 탭 → 그 곡으로 점프(jumpTo, 메인 전용)**, 행 ✕ → 삭제. 상단 **반복 아이콘**(색상 off/all/one) + **셔플 아이콘**(shuffleQueue) + **다음 곡**
+- **곡 추가**는 드물어 **기본 접힌** 섹션. **곡 변경 폼·탐색(seek) 슬라이더는 없음**(곡 교체는 행 탭/다음곡으로)
+- 메인-전용 이벤트(다음곡/jumpTo/제거/반복/셔플(shuffleQueue)/탐색(seekTo,프로토콜만)/설정/예약) 발행 가능
 
 ### Controller `/controller?room=CODE` (GUEST / 리모컨)
-- **now-playing 카드**: 현재 곡 제목/링크
-- **곡 변경 폼**: URL + **사유 필수** + 제목(선택)
-- **음량 슬라이더**: 0–100
-- **재생/일시정지** 토글, **곡 추가(enqueue)**, **곡별 게인**
-- **Activity Log 피드**: 신규 항목 실시간 추가
-- 메인-전용 이벤트(다음곡/반복/셔플/탐색/설정/예약 등)는 **노출하지 않음**
+- **이름 설정/변경 바**: 닉네임을 정하거나 바꿀 수 있음. **첫 입장 시 "형용사 + 사물명사" 랜덤 기본값**(예: "졸린 주전자") 자동 지정 — 비우고 입장하면 익명. 익명이 막힌 방에서도 이름을 넣어 곡 추가 가능
+- **시각적 음량 슬라이더**(채워지는 트랙)·**곡별 게인**, **재생/일시정지**
+- **곡 추가(enqueue)**: **URL만** 입력(사유 없음, 제목은 서버가 YouTube 에서 자동 채움)
+- **단일 재생목록**: 재생함(흐릿) → 현재곡(굵게) → 다음 곡. **본인이 추가한 곡만 ✕**(삭제 시 **확인 다이얼로그**). 게스트는 행 탭 점프 불가(삭제만)
+- **Activity Log 피드**: 신규 항목 실시간 추가. **리모컨은 최근 5시간만 표시**(서버는 전체 보관)
+- **곡 변경 폼은 없음**(메인 전용). 메인-전용 이벤트(다음곡/반복/셔플/탐색/설정/예약/즉시재생)는 **노출하지 않음**
 
 ## WebSocket 프로토콜
 
-전송 계층은 **Socket.IO**. 모든 Client→Server 이벤트는 **ack 콜백** 을 가지며 `{ ok: boolean; error?: string }` 를 반환한다. **게스트-허용 이벤트**(`changeTrack`/`enqueueTrack`/`setVolume`/`togglePlay`/`setTrackGain`)는 **Player·Controller 둘 다** 발행할 수 있고, **메인-전용 이벤트**(`nextTrack`/`removeQueued`/`setRepeat`/`setShuffle`/`seekTo`/`updateSettings`/`setSchedule`)는 **Player(메인)만** 발행할 수 있다(Controller가 발행 시 ack `{ ok:false, error:'player only' }`).
+전송 계층은 **Socket.IO**. 모든 Client→Server 이벤트는 **ack 콜백** 을 가지며 `{ ok: boolean; error?: string }` 를 반환한다. **게스트-허용 이벤트**(`changeTrack`/`enqueueTrack`/`setVolume`/`togglePlay`/`setTrackGain`)는 **Player·Controller 둘 다** 발행할 수 있고, **메인-전용 이벤트**(`nextTrack`/`jumpTo`/`setRepeat`/`shuffleQueue`/`seekTo`/`updateSettings`/`setSchedule`)는 **Player(메인)만** 발행할 수 있다(Controller가 발행 시 ack `{ ok:false, error:'player only' }`). `removeQueued` 는 멤버가 발행하되 **소유권**으로 제한된다.
 
 ### 이벤트 표
 
 | 이름 | 방향 | 페이로드 | ack / 결과 |
 | --- | --- | --- | --- |
 | `join` | C→S | `{ roomCode: string; role: Role; nickname?: string; password?: string }` | `{ ok, error? }`; 성공 시 해당 소켓에 `state` + `activityLog` 전송. 방에 비밀번호가 설정돼 있으면 일치해야 함(아래 보안 규칙) |
-| `changeTrack` | C→S | `{ url: string; reason: string; title?: string }` | reason이 trim 후 빈 문자열이면 `{ ok:false, error }`; url에서 video id 파싱 실패 시 `{ ok:false, error }`; **임베드 불가/이용 불가 영상은 추가 시점에 거부** `{ ok:false, error:'embed disabled' }`(oEmbed 401/404, best-effort/fail-open — 아래 임베드 검사 참고) |
+| `changeTrack` | C→S | `{ url: string; reason: string; title?: string }` | reason이 trim 후 빈 문자열이면 `{ ok:false, error }`; url에서 video id 파싱 실패 시 `{ ok:false, error }`; **임베드 불가/이용 불가 영상은 추가 시점에 거부** `{ ok:false, error:'embed disabled' }`(oEmbed 401/404, best-effort/fail-open). 새 Track을 **playlist 끝에 추가하고 커서를 그 곡으로 점프**(`isPlaying:true`). activity `track_change` |
 | `setVolume` | C→S | `{ volume: number; reason?: string }` | 서버가 `clampVolume` 으로 0..100 정수 보정 후 적용 |
 | `togglePlay` | C→S | `{ isPlaying: boolean; reason?: string }` | activity는 `play` 또는 `pause` 로 기록 |
 | `updateSettings` | C→S | `{ settings: Partial<RoomSettings>; reason?: string }` | **Player 전용(메인)**(controller가 발행 시 `{ ok:false, error:'player only' }`). 부분 병합 |
-| `enqueueTrack` | C→S | `{ url: string; reason?: string; title?: string }` | url 파싱 실패 시 `{ ok:false, error:'invalid youtube url' }`; **임베드 불가/이용 불가 영상은 추가 시점에 거부** `{ ok:false, error:'embed disabled' }`(oEmbed 401/404). **사유 선택**. 큐 끝에 추가, activity `enqueue` |
-| `removeQueued` | C→S | `{ index: number; reason?: string }` | **멤버(Player·Controller 둘 다)**가 발행할 수 있으나 **소유권**으로 제한된다. `index` 가 `[0, queue.length)` 정수가 아니면 `{ ok:false, error:'invalid index' }`. **Player(메인)는 어떤 곡이든 제거 가능**, Controller는 **자신이 추가한 곡만**(소켓 `ownerId` 일치 또는 닉네임이 있고 `addedBy` 일치) 제거 가능 — 아니면 `{ ok:false, error:'not your item' }`. 허용 시 activity `dequeue` |
-| `nextTrack` | C→S | `{ reason?: string }` | **Player 전용(메인)**(controller가 발행 시 `{ ok:false, error:'player only' }`). 큐가 있으면 맨 앞 곡을 `currentTrack` 으로 승격(`isPlaying:true`), activity `skip`. 큐가 비어있으면 `{ ok:true }` no-op. **사유 선택** |
-| `trackEnded` | C→S | `{}` | **Player 전용**(controller가 발행 시 `{ ok:false, error:'player only' }`). 자동 next처럼 동작: 큐 있으면 승격(activity `skip`, detail `{auto:true}`), 비어있으면 `isPlaying:false` |
+| `enqueueTrack` | C→S | `{ url: string; reason?: string; title?: string }` | url 파싱 실패 시 `{ ok:false, error:'invalid youtube url' }`; **임베드 불가 영상 거부** `{ ok:false, error:'embed disabled' }`(oEmbed 401/404). **사유 선택**. playlist 끝에 추가; **IDLE(`currentIndex < 0`)이면 그 곡(index 0)을 즉시 재생**. activity `enqueue` |
+| `removeQueued` | C→S | `{ index: number; reason?: string }` | playlist[index] 제거. **멤버**가 발행하되 **소유권** 제한: `index` 가 `[0, playlist.length)` 정수가 아니면 `{ ok:false, error:'invalid index' }`. **Player는 어떤 곡이든**, Controller는 **자신이 추가한 곡만**(`ownerId` 일치 또는 닉네임+`addedBy` 일치) — 아니면 `{ ok:false, error:'not your item' }`. 커서 보정(index<cur→cur-1; index===cur→다음 곡이 슬라이드인/끝이면 한 칸 당김, 비면 -1+정지). activity `dequeue`, detail `{index,id,title}` |
+| `jumpTo` | C→S | `{ index: number; reason?: string }` | **Player 전용(메인)**(controller가 발행 시 `{ ok:false, error:'player only' }`). 행 탭 = 그 곡으로 커서 점프. 범위 밖이면 `{ ok:false, error:'invalid index' }`. `currentIndex=index`, `isPlaying:true`, `playbackError:null`. activity `track_change`, detail `{id,url,title}` |
+| `nextTrack` | C→S | `{ reason?: string }` | **Player 전용(메인)**(controller가 발행 시 `{ ok:false, error:'player only' }`). 커서를 앞으로(advance). 커서가 끝이고 repeat≠'all' 이면 `{ ok:true }` no-op. activity `skip`. **사유 선택** |
+| `trackEnded` | C→S | `{}` | **Player 전용**(controller가 발행 시 `{ ok:false, error:'player only' }`). repeat 'one' 이면 현재곡 재시작(lastSeek 0), 아니면 advance(activity `skip`, detail `{auto:true}`) |
 | `seekTo` | C→S | `{ seconds: number; reason?: string }` | **Player 전용(메인)**(controller가 발행 시 `{ ok:false, error:'player only' }`). `seconds` 가 유한수 `>= 0` 가 아니면 `{ ok:false, error:'invalid seconds' }`. `lastSeek` 갱신, activity `seek`, detail `{seconds}`. **사유 선택** |
 | `progress` | C→S | `{ currentTime: number; duration: number }` | **Player 전용**(controller가 발행 시 `{ ok:false, error:'player only' }`). `currentTime`/`duration` 이 유한수 `>= 0` 가 아니면 `{ ok:false, error:'invalid progress' }`. `progress` 갱신 + 브로드캐스트. **로그 기록 안 함**(고빈도) |
-| `playbackError` | C→S | `{ code: number }` | **Player 전용**(controller가 발행 시 `{ ok:false, error:'player only' }`). `code` 가 유한수가 아니면 `{ ok:false, error:'invalid code' }`. activity `error`(code→한국어 메시지) 기록 후 **자동으로 다음 곡으로 넘어감**(큐가 있으면 승격; 비어있으면 `isPlaying:false` 로 멈추고 `playbackError = { code, ts, id }` 로 오류를 유지) |
+| `playbackError` | C→S | `{ code: number; id?: string }` | **Player 전용**(controller가 발행 시 `{ ok:false, error:'player only' }`). `code` 가 유한수가 아니면 `{ ok:false, error:'invalid code' }`. **`id`(실패한 videoId)가 현재 곡과 다르면 stale 로 보고 무시**(점프/교체 직후 늦게 온 오류가 엉뚱한 곡을 건너뛰지 않게). 유효하면 activity `error` 기록 후 **앞에 곡이 있으면 advance**(반복 'all' 래핑 안 함 — 단일 곡 무한 오류 방지); 없으면 `isPlaying:false` + `playbackError = { code, ts, id }` |
 | `setTrackGain` | C→S | `{ videoId: string; gain: number; reason?: string }` | **게스트-허용(Player·Controller 둘 다)**. `videoId` 가 비어있지 않은 문자열이 아니면 `{ ok:false, error:'invalid videoId' }`. `clampGain(gain)` 으로 `[0.2, 1.0]` 보정 후 `trackGain[videoId]` 에 설정, activity `gain`, detail `{videoId, gain}`, 브로드캐스트. **사유 선택** |
 | `setRepeat` | C→S | `{ mode: 'off'\|'one'\|'all'; reason?: string }` | **Player 전용(메인)**(controller가 발행 시 `{ ok:false, error:'player only' }`). `mode` 가 `off`/`one`/`all` 이 아니면 `{ ok:false, error:'invalid mode' }`. `repeat` 갱신, activity `mode`, detail `{repeat}`, 브로드캐스트. **사유 선택** |
-| `setShuffle` | C→S | `{ shuffle: boolean; reason?: string }` | **Player 전용(메인)**(controller가 발행 시 `{ ok:false, error:'player only' }`). `shuffle` 를 boolean 으로 강제. `shuffle` 갱신, activity `mode`, detail `{shuffle}`, 브로드캐스트. **사유 선택** |
+| `shuffleQueue` | C→S | `{ reason?: string }` | **Player 전용(메인)**(controller가 발행 시 `{ ok:false, error:'player only' }`). **일회성**: 앞으로 재생될 항목(`playlist.slice(currentIndex+1)`)만 무작위 재정렬. 재생함+현재곡은 그대로. 앞으로 재생할 곡이 2개 미만이면 no-op `{ok:true}`. activity `mode`, detail `{shuffledQueue:true}` |
 | `setSchedule` | C→S | `{ schedule: WeeklySchedule \| null; reason?: string }` | **Player 전용**(예약은 디바이스/운영 설정 — controller가 발행 시 `{ ok:false, error:'player only' }`). `schedule` 가 `null` 이면 예약 해제. 아니면 검증(`enabled` boolean, 7개 요일 키, 각 `on` boolean + `isHHMM(start)`/`isHHMM(end)` + `start < end`) — 실패 시 `{ ok:false, error:'invalid schedule' }`. `schedule` 갱신, activity `schedule`(detail `{enabled}`), 브로드캐스트. **사유 선택** |
 | `state` | S→C | `RoomState` | join 직후 + 모든 변경 후 브로드캐스트 |
 | `activity` | S→C | `ActivityEntry` | 신규 항목 1건 |
@@ -94,12 +95,13 @@ interface RoomSettings {
 
 interface RoomState {
   roomCode: string;
-  currentTrack: Track | null;
-  queue: Track[];          // currentTrack 다음에 순서대로 재생될 대기열
+  // 단일 재생목록 + 커서. currentIndex 이전=재생함, currentIndex=현재곡, 이후=다음 곡.
+  playlist: Track[];
+  currentIndex: number;    // playlist 커서. 비었거나 시작 전이면 -1
+  blockedIds: string[];    // 재생 불가(임베드 비활성)로 학습된 videoId들. 목록에 "재생 불가" 표시 + advance가 스킵
   isPlaying: boolean;
   volume: number;          // 0-100
   repeat: 'off' | 'one' | 'all'; // 반복 모드(기본 'off')
-  shuffle: boolean;        // 셔플(기본 false) — 다음 곡을 무작위로 선택
   settings: RoomSettings;
   presence: { playerConnected: boolean; controllers: number };
   updatedAt: number;       // epoch ms
@@ -143,54 +145,56 @@ interface ActivityEntry {
 }
 ```
 
-## 재생 큐 (queue / playlist)
+## 재생목록 (playlist + cursor)
 
-방은 단일 `currentTrack` 외에 **재생 큐**(`RoomState.queue: Track[]`)를 가진다. 큐는 `currentTrack` **다음에** 순서대로 재생될 대기 곡 목록이며, 맨 앞(index 0)이 다음 곡이다.
+방은 **단일 재생목록**(`RoomState.playlist: Track[]`)과 **커서**(`RoomState.currentIndex`)를 가진다.
+`currentIndex` **이전** 항목 = 이미 재생함, `currentIndex` = 현재 곡, **이후** = 다음 곡들.
+빈 방/시작 전이면 `currentIndex = -1`. 곡은 칸 사이를 이동하지 않고 **리스트에 그대로 남으며**, 커서만
+움직인다 — 그래서 반복(all)이 "리스트를 그대로 다시 돈다"로 자연스럽게 보인다.
 
 | 동작 | 발행자 | 사유 | 효과 |
 | --- | --- | --- | --- |
-| `enqueueTrack` | **Player·Controller(게스트-허용)** | **선택** | url 파싱 → `Track {id,url,title,addedBy}` 를 큐 끝에 추가. activity `enqueue`, detail `{id,url,title}`. **단 방이 IDLE(`currentTrack === null`)이면 추가한 곡을 즉시 `currentTrack` 으로 승격하고(`isPlaying:true`, `playbackError:null`) 큐를 비운다 — 빈 플레이어에 곡을 넣으면 바로 재생 시작** |
-| `removeQueued` | **멤버(소유권 제한)** | **선택** | `index` 위치의 곡 제거(범위 밖이면 `invalid index`). **Player는 모든 곡, Controller는 자신이 추가한 곡만**(아니면 `not your item`). activity `dequeue`, detail `{index}` |
-| `nextTrack` | **Player 전용(메인)** | **선택** | 큐 맨 앞 곡을 `currentTrack` 으로 승격하고 큐에서 제거, `isPlaying:true`. 큐가 비어있으면 no-op `{ok:true}`. activity `skip`, detail `{id}` |
-| `trackEnded` | **Player 전용** | 없음 | 플레이어가 현재 곡 종료를 보고. 자동 next처럼 동작 — 큐 있으면 승격(activity `skip`, detail `{auto:true}`), 비어있으면 `isPlaying:false` |
+| `changeTrack` | **게스트-허용** | **필수** | 새 `Track` 을 playlist 끝에 추가하고 **커서를 그 곡으로 점프**(`isPlaying:true`, `playbackError:null`). activity `track_change` |
+| `enqueueTrack` | **게스트-허용** | **선택** | `Track` 를 playlist 끝에 추가. **IDLE(`currentIndex < 0`)이면 그 곡(index 0)을 즉시 재생**(`isPlaying:true`). activity `enqueue`, detail `{id,url,title}` |
+| `jumpTo` | **Player 전용(메인)** | **선택** | 행 탭 = `currentIndex=index` 로 점프 재생(`isPlaying:true`, `playbackError:null`). 범위 밖이면 `invalid index`. activity `track_change`, detail `{id,url,title}` |
+| `removeQueued` | **멤버(소유권 제한)** | **선택** | playlist[index] 제거(범위 밖이면 `invalid index`). **Player는 모든 곡, Controller는 자신이 추가한 곡만**(아니면 `not your item`). 커서 보정. activity `dequeue`, detail `{index,id,title}` |
+| `nextTrack` | **Player 전용(메인)** | **선택** | 커서를 앞으로(advance). 끝이고 repeat≠'all' 이면 no-op `{ok:true}`. activity `skip`, detail `{id,title}` |
+| `trackEnded` | **Player 전용** | 없음 | 현재 곡 종료 보고. repeat 'one' 이면 현재곡 재시작, 아니면 advance(activity `skip`, detail `{auto:true}`) |
 
-- **사유 정책**: `enqueueTrack` / `nextTrack` / `trackEnded` 의 사유는 **선택**이다(비면 `reason: null` 로 기록). 반면 **`changeTrack` 은 사유 필수**(`validateReason`)이며, `currentTrack` 만 설정하고 **큐를 건드리지 않는다** — 큐 모델과 독립적이다.
-- **제목 자동 채움(YouTube oEmbed)**: `changeTrack` / `enqueueTrack` 에서 `title` 이 생략되면(빈/미지정) 서버는 먼저 `title: null` 로 즉시 적용·브로드캐스트(스내피한 ack/broadcast 유지)한 뒤, **비동기**로 YouTube oEmbed(`https://www.youtube.com/oembed?url=...&format=json`, 3s 타임아웃)에서 제목을 best-effort 로 조회한다. 성공 시 해당 곡(아직 `title` 이 비어있는 `currentTrack`/큐 항목)에 제목을 채우고 **재브로드캐스트**한다. 실패/타임아웃/오류 시 `null` 로 두며 절대 곡 변경을 막지 않는다(fire-and-forget). 이미 제공된 non-null `title` 은 덮어쓰지 않는다.
-- **임베드 가능 검사(YouTube oEmbed)**: `changeTrack` / `enqueueTrack` 에서 url 파싱 성공 후, 서버는 oEmbed(`https://www.youtube.com/oembed?url=...&format=json`, 3s 타임아웃)로 임베드 가능 여부를 **추가 시점에 한 번** 확인한다. oEmbed 401/404 → 임베드 비활성화/이용 불가로 보고 `{ ok:false, error:'embed disabled' }` 로 **거부**한다. oEmbed 200 → 통과. 그 외 상태/네트워크 오류/타임아웃 → **unknown(null)** 이며 **fail-open**(통과)하여 검사 실패가 곡 추가를 막지 않게 한다. `REMOTE_DJ_FAKE_TITLE` 가 설정된 테스트/QA 모드에서는 네트워크 없이 항상 통과한다.
-- **`trackEnded` 는 Player 전용**이다: controller가 발행하면 ack `{ ok:false, error:'player only' }`. **`nextTrack` 도 Player 전용(메인)**이다(controller가 발행 시 `player only`). **`removeQueued` 는 멤버(Player·Controller 둘 다) 발행 가능하나 소유권으로 제한**된다 — Player는 모든 곡, Controller는 자신이 추가한 곡만(아니면 `not your item`). **`enqueueTrack` 은 게스트-허용**이라 Player·Controller 둘 다 발행할 수 있다.
-- **빈 플레이어 auto-start(QUEUE-14)**: `enqueueTrack` 시 방이 IDLE(`currentTrack === null`)이면 서버는 추가한 곡을 즉시 `currentTrack` 으로 승격하고 `isPlaying:true`, `playbackError:null`, `queue` 를 비운다. 이미 재생 중(`currentTrack !== null`)이면 큐 끝(FIFO)에만 추가한다.
-- 신규 방은 `queue: []` 로 시작한다.
+- **사유 정책**: `changeTrack` 은 사유 **필수**(`validateReason`). `enqueueTrack`/`jumpTo`/`nextTrack`/`trackEnded` 등은 **선택**(비면 `reason: null`).
+- **제목 자동 채움(YouTube oEmbed)**: `changeTrack`/`enqueueTrack` 에서 `title` 생략 시 서버는 `title: null` 로 즉시 적용·브로드캐스트한 뒤, **비동기**로 oEmbed(3s 타임아웃)에서 제목을 best-effort 조회한다. 성공 시 해당 곡(아직 `title` 이 비어있는 playlist 항목)에 제목을 채우고 **재브로드캐스트**한다. **또한 그 곡 id 로 기록됐지만 `detail.title` 이 비어있던 Activity Log 항목(예: enqueue)도 제목을 backfill 하고 전체 `activityLog` 를 재전송**한다 — 로그에 "제목 없음" 대신 실제 제목이 보인다. 실패 시 `null` 로 두며 곡 추가를 막지 않는다(fire-and-forget). non-null `title` 은 덮어쓰지 않는다.
+- **임베드 가능 검사(추가 시점)**: `changeTrack`/`enqueueTrack` 에서 url 파싱 후 임베드 가능 여부를 **추가 시점에 확인**하고 불가하면 `{ ok:false, error:'embed disabled' }` 로 거부한다.
+  - **(A) 확정 경로 — `YOUTUBE_API_KEY` 설정 시**: YouTube Data API `videos.list?part=status` 의 `status.embeddable` 로 판정(영상 없음/임베드 비활성 → 거부). **첫 추가에서 임베드 비활성 영상을 막을 수 있는 유일한 방법.**
+  - **(B) 키 없을 때 — oEmbed(3s)**: 401/404 → 거부, 200 → 통과(단 **임베드 비활성 영상은 oEmbed가 200을 반환**해 첫 추가는 통과됨), 그 외/오류/타임아웃 → fail-open.
+  - **(C) per-room 학습 차단**: Player가 재생 중 임베드 오류(코드 101/150)를 보고하면 서버는 그 `videoId` 를 **`RoomState.blockedIds`**(해당 방)에 기록한다. 이후: ① 목록 UI에 **"재생 불가"** 로 표시(흑백 썸네일·취소선, 자동 건너뜀 안내), ② `advance()` 가 그 곡을 **스킵**, ③ 같은 영상의 추가를 추가 시점에 `embed disabled` 로 거부. 방 삭제(빈 방 grace 후)되면 `blockedIds` 도 사라져 새 방에서 다시 학습.
+  - **resolveEmbeddable 반환 규약**: `false`=확정 불가(Data API `status.embeddable=false`, 즉 소유자가 임베드 OFF) → 거부, `true`=Data API가 가능이라 함, `null`=알 수 없음(oEmbed 200·키 없음·오류·테스트). `decideEmbed`: `false`면 거부, **이미 blockedIds에 있으면 `true`든 `null`이든 거부(sticky)**, 그 외 허용.
+  - **중요(라이선스 음악 한계)**: `status.embeddable` 은 **소유자 토글**일 뿐, 저작권/라이선스가 걸린 음악 영상은 `embeddable=true` 인데도 임베드 재생 시 150으로 막힌다. 즉 **API 키가 있어도 이런 영상은 추가 시점에 못 막고**, 오직 재생 시 150(ground truth)으로만 잡힌다. 그래서 150으로 학습한 차단은 **API `true` 로도 자동 해제하지 않는다**(해제하면 재추가→재실패 반복).
+  - **임베드 다시 켜지면?**: 150-학습 차단은 **방이 재생성될 때(빈 방 grace 후 삭제) 초기화**되어 다시 시도된다(같은 방에서는 고정 유지). API 키는 **소유자가 임베드를 끈 영상**(embeddable=false)을 첫 추가에 막는 데만 확실히 유효하다.
+  - `REMOTE_DJ_FAKE_TITLE` 설정 시 네트워크 없이 `null`(테스트는 blocklist 동작을 검증).
+- **빈 플레이어 auto-start**: `enqueueTrack` 시 `currentIndex < 0`(빈 재생목록)이면 추가한 곡(index 0)을 즉시 `currentIndex` 로 잡고 `isPlaying:true`. 이미 재생 중이면 playlist 끝에만 추가한다.
+- 신규 방은 `playlist: []`, `currentIndex: -1` 로 시작한다.
 
 ## 반복/셔플/다음곡 결정 (repeat / shuffle / advance)
 
-방은 두 재생 모드를 가진다: `RoomState.repeat`(`'off'`(기본)/`'one'`/`'all'`)와
-`RoomState.shuffle`(기본 `false`). 둘 다 **Player 전용(메인)** 이벤트로 변경한다(controller가 발행 시 `player only`).
+`RoomState.repeat`(`'off'`(기본)/`'one'`/`'all'`)는 **Player 전용(메인)** 이벤트로 바꾼다.
 
 | 동작 | 발행자 | 사유 | 효과 |
 | --- | --- | --- | --- |
-| `setRepeat` | **Player 전용(메인)** | **선택** | `mode` 검증(아니면 `invalid mode`). `repeat` 갱신, activity `mode`, detail `{repeat}` |
-| `setShuffle` | **Player 전용(메인)** | **선택** | `shuffle` 를 boolean 으로 강제. `shuffle` 갱신, activity `mode`, detail `{shuffle}` |
+| `setRepeat` | **Player 전용(메인)** | **선택** | `mode` 검증(아니면 `invalid mode`). `repeat` 갱신, activity `mode`, detail `{repeat}`. UI는 아이콘 색상으로 off/all/one 표시 |
+| `shuffleQueue` | **Player 전용(메인)** | **선택** | **일회성**: 앞으로 재생될 항목(`playlist.slice(currentIndex+1)`)만 무작위 재정렬(Fisher–Yates). 재생함+현재곡은 그대로. 앞으로 재생할 곡이 2개 미만이면 no-op `{ok:true}`. activity `mode`, detail `{shuffledQueue:true}`. 유튜브 셔플 버튼과 동일 — UI는 아이콘 |
 
-**큐 모델(불변)**: `enqueueTrack` 은 항상 **큐 끝(FIFO)** 에 추가한다 — shuffle 여부와 무관.
+**다음곡 결정(advance)** — `nextTrack`(수동)과 `trackEnded`(자동)가 공유:
+- `next = currentIndex + 1`. `next < playlist.length` 이면 그 곡으로(커서만 이동, `isPlaying:true`, `playbackError:null`, activity `skip`).
+- `next >= playlist.length`(끝):
+  - `repeat === 'all'`: 커서를 **0 으로 래핑**(리스트를 그대로 다시 돈다).
+  - `repeat === 'off' | 'one'`: 정지(`isPlaying:false`), 커서는 마지막 곡에 유지.
+- 빈 재생목록: `isPlaying:false`, `currentIndex:-1`.
 
-**다음곡 결정(advance)** — `nextTrack`(수동)과 `trackEnded`(자동)가 공유하는 단일 로직:
-- **큐가 있으면**: 떠나는 `currentTrack` 을 **서버 전용 history** 에 넣고, 큐에서 다음 곡을
-  고른다 — `shuffle` 이면 무작위 인덱스, 아니면 맨 앞(head). 큐에서 그 곡을 제거.
-- **큐가 비었으면**:
-  - `repeat === 'all'`: 지금까지 재생한 전체(`history + 현재곡`)로 풀을 재구성해 처음부터 다시
-    재생한다(`shuffle` 이면 순서를 섞음). history 는 비운다. 재생한 적이 없으면 그냥 정지.
-  - `repeat === 'off' | 'one'`: 정지(`isPlaying:false`), `currentTrack` 유지.
+**반복 'one'(현재곡 반복)**: **자동 종료(`trackEnded`)** 에서만 — `currentIndex >= 0` 이면 `lastSeek = { seconds: 0, ts }` + `isPlaying:true` 로 현재곡 재시작하고 **activity 를 남기지 않는다**. **수동 next 는 'one' 을 무시**(항상 다음 곡으로). 끝이고 `repeat !== 'all'` 이면 `{ok:true}` no-op.
 
-**반복 'one'(현재곡 반복)**: **자동 종료(`trackEnded`)** 에서만 동작한다 — `currentTrack` 이
-있으면 `lastSeek = { seconds: 0, ts }` + `isPlaying:true` 로 **현재곡을 처음부터 다시 재생**하고
-**activity 를 남기지 않는다**(로그 오염 방지). advance() 로 가지 않는다.
+**removeQueued 커서 보정**: `index < currentIndex` → `currentIndex--`; `index === currentIndex`(현재곡 삭제) → 다음 곡이 그 자리에 슬라이드인(끝이었으면 한 칸 당김, 비면 `-1`+`isPlaying:false`, `playbackError` 클리어); `index > currentIndex` → 그대로.
 
-**수동 next 는 반복 'one' 을 무시**한다(항상 *다른* 다음 곡으로). 큐가 비고 `repeat !== 'all'`
-이면 갈 곳이 없으므로 `{ok:true}` no-op 으로 끝낸다(재생을 멈추지 않음 — 기존 동작 유지).
-
-**history 는 서버 전용**(`RoomRecord.history: Track[]`, 최근 100개 cap)이며 **`RoomState`/
-브로드캐스트에 절대 포함하지 않는다**. `changeTrack` 도 이전 `currentTrack` 을 history 에 넣어
-repeat-'all' 풀에 수동 변경 곡까지 포함되게 한다. 새 곡 승격 시 `playbackError: null` 로 비운다.
+**playbackError 처리**: 현재 곡 오류는 activity `error` 기록 후, **앞에 곡이 있으면 advance**(반복 'all' 래핑은 **하지 않음** — 단일 곡 무한 오류 방지). 없으면 정지 + `playbackError = { code, ts, id }`.
 
 ## 탐색(Seek) / 진행상황(Progress)
 
@@ -246,8 +250,9 @@ activity `gain`(detail `{videoId, gain}`)을 남긴 뒤 브로드캐스트한다
 - 자동 시드는 **activity 를 남기지 않는다**(로그 오염 방지). 결정적 테스트/QA 를 위해 환경변수
   `REMOTE_DJ_FAKE_LOUDNESS` 가 설정되면 네트워크 없이 그 값을 라우드니스로 사용한다.
 
-**Player 적용**: Player 는 `effectiveVolume = clamp(round(volume × (trackGain[currentTrack.id] ?? 1)))`
-로 실제 재생 음량을 계산해 적용한다(master `volume` 은 그대로 두고 곡별로만 감쇠).
+**Player 적용**: Player 는 현재 곡(`playlist[currentIndex]`)에 대해
+`effectiveVolume = clamp(round(volume × (trackGain[현재곡.id] ?? 1)))` 로 실제 재생 음량을 계산해
+적용한다(master `volume` 은 그대로 두고 곡별로만 감쇠).
 
 ## 주간 예약(스케줄) — 자동 재생/종료
 
@@ -273,9 +278,9 @@ activity `gain`(detail `{videoId, gain}`)을 남긴 뒤 브로드캐스트한다
   매 분 강제로 상태를 덮어쓰지 **않는다** — 따라서 윈도우 **중간에 수동 일시정지**해도, 다음 예약
   가장자리(윈도우 시작/종료)까지는 다시 재생을 켜지 않는다(수동 제어와 싸우지 않음). 무의견(null)은
   가장자리로 기록하지 않는다.
-- **시작(want `true` 이고 정지 상태)**: `currentTrack` 이 있으면 `isPlaying:true` 로 재개,
-  없고 큐가 있으면 `advance()` 로 큐 맨 앞 곡 승격, 둘 다 없으면 `isPlaying:true` 만 세팅(무해).
-  그 뒤 activity `schedule`(detail `{auto:true, action:'play'}`) 기록 + 브로드캐스트.
+- **시작(want `true` 이고 정지 상태)**: `currentIndex >= 0` 이면 `isPlaying:true` 로 재개,
+  아니고 `playlist` 가 있으면 `currentIndex:0` 으로 첫 곡 재생, 둘 다 없으면 `isPlaying:true` 만
+  세팅(무해). 그 뒤 activity `schedule`(detail `{auto:true, action:'play'}`) 기록 + 브로드캐스트.
 - **종료(want `false` 이고 재생 중)**: `isPlaying:false`, activity `schedule`(detail `{auto:true, action:'stop'}`),
   브로드캐스트.
 - **영속**: 예약은 `RoomState.schedule` 의 일부이므로 `PersistentRoomStore` 에 의해 **자동 저장**된다.
@@ -317,7 +322,7 @@ activity `gain`(detail `{videoId, gain}`)을 남긴 뒤 브로드캐스트한다
 | a3 | 1748... | null | `pause` | null | — |
 | a4 | 1748... | "영희" | `settings` | null | `{ allowAnonymous: false }` |
 
-- `actor` 가 `null` 이면 익명으로 표시한다.
+- **actor 규칙**: 액션을 발행한 소켓의 역할로 결정한다. **Player(메인) 액션은 `"Player"`**(닉네임이 있으면 `"Player(닉네임)"`)로 기록되고, Controller(게스트)는 `닉네임` 또는 `null`(익명)이다. `actor` 가 `null` 이면 클라이언트에서 "익명"으로 표시한다.
 - `track_change` 는 항상 `reason` 이 non-null이다(검증 규칙).
 
 ## 설정 (RoomSettings / allowAnonymous)

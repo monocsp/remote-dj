@@ -24,9 +24,11 @@ export interface WeeklySchedule {
 }
 
 // ── Playback modes ─────────────────────────────────────────────────────────
-// off  — when the queue empties, stop (keep currentTrack).
+// A single ordered `playlist` with a `currentIndex` cursor. Advancing moves the
+// cursor forward; repeat decides what happens at the end:
+// off  — reaching the end stops (cursor stays on the last track).
 // one  — on AUTO track end, replay the current track (manual next ignores this).
-// all  — when the queue empties, loop back through everything already played.
+// all  — reaching the end wraps the cursor back to 0 (the list repeats in place).
 export type RepeatMode = 'off' | 'one' | 'all';
 
 // ── Domain types ───────────────────────────────────────────────────────────
@@ -45,12 +47,19 @@ export interface RoomSettings {
 
 export interface RoomState {
   roomCode: string;
-  currentTrack: Track | null;
-  queue: Track[]; // upcoming tracks, played in order after currentTrack
+  // The single ordered playlist. Items BEFORE currentIndex are already played,
+  // the item AT currentIndex is now playing, items AFTER are upcoming. Replaces
+  // the old currentTrack/queue/history split so the list is stable and repeat
+  // simply loops the cursor.
+  playlist: Track[];
+  // Cursor into `playlist`. -1 when the playlist is empty / nothing has started.
+  currentIndex: number;
+  // videoIds known to be UNPLAYABLE in this room (embed-disabled, learned from a
+  // playback error). Shown in the list as "재생 불가" and skipped by advance.
+  blockedIds: string[];
   isPlaying: boolean;
   volume: number; // 0-100
   repeat: RepeatMode; // 'off' (default) | 'one' | 'all'
-  shuffle: boolean; // when true, advance picks a random track instead of the head
   settings: RoomSettings;
   presence: { playerConnected: boolean; controllers: number };
   updatedAt: number; // epoch ms
@@ -132,7 +141,13 @@ export interface EnqueueTrackPayload {
 }
 
 export interface RemoveQueuedPayload {
-  index: number; // index into RoomState.queue
+  index: number; // index into RoomState.playlist
+  reason?: string;
+}
+
+// Jump the cursor to an existing playlist index and play it. MAIN (player) only.
+export interface JumpToPayload {
+  index: number; // index into RoomState.playlist
   reason?: string;
 }
 
@@ -156,8 +171,11 @@ export interface ProgressPayload {
 }
 
 // Player reports a YouTube playback error (IFrame API error code). Player-only.
+// `id` (the videoId that failed) lets the server ignore a STALE error that
+// arrives after the track already changed/jumped.
 export interface PlaybackErrorPayload {
   code: number;
+  id?: string;
 }
 
 // Controller sets the per-track loudness-normalization gain (attenuation only).
@@ -173,9 +191,9 @@ export interface SetRepeatPayload {
   reason?: string;
 }
 
-// Controller toggles shuffle.
-export interface SetShufflePayload {
-  shuffle: boolean;
+// One-shot: randomize the order of the UPCOMING items only (those AFTER
+// currentIndex); the current and already-played items stay put. Player only.
+export interface ShuffleQueuePayload {
   reason?: string;
 }
 
@@ -199,6 +217,7 @@ export const C2S = {
   UpdateSettings: 'updateSettings',
   EnqueueTrack: 'enqueueTrack',
   RemoveQueued: 'removeQueued',
+  JumpTo: 'jumpTo',
   NextTrack: 'nextTrack',
   TrackEnded: 'trackEnded',
   SeekTo: 'seekTo',
@@ -206,8 +225,8 @@ export const C2S = {
   PlaybackError: 'playbackError',
   SetTrackGain: 'setTrackGain',
   SetRepeat: 'setRepeat',
-  SetShuffle: 'setShuffle',
   SetSchedule: 'setSchedule',
+  ShuffleQueue: 'shuffleQueue',
 } as const;
 
 export const S2C = {

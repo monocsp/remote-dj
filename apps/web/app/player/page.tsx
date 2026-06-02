@@ -1,6 +1,7 @@
 'use client';
 
 import { ControlPanel } from '@/components/ControlPanel';
+import { playbackErrorMessage } from '@/lib/errors';
 import {
   actions,
   connectRoom,
@@ -27,6 +28,11 @@ interface YTPlayer {
   playVideo(): void;
   pauseVideo(): void;
   setVolume(volume: number): void;
+  // Mobile autoplay forces a muted start; we must explicitly unMute() once a
+  // non-zero volume is wanted, or setVolume() alone produces no audible change.
+  mute(): void;
+  unMute(): void;
+  isMuted(): boolean;
   getCurrentTime(): number;
   getDuration(): number;
   seekTo(seconds: number, allowSeekAhead: boolean): void;
@@ -59,23 +65,6 @@ declare global {
 
 const IFRAME_API_SRC = 'https://www.youtube.com/iframe_api';
 
-/** Map a YouTube IFrame API error code to a Korean message. */
-function playbackErrorMessage(code: number): string {
-  switch (code) {
-    case 2:
-      return '잘못된 영상 링크';
-    case 5:
-      return 'HTML5 재생 오류';
-    case 100:
-      return '영상을 찾을 수 없음';
-    case 101:
-    case 150:
-      return '임베드가 비활성화된 영상';
-    default:
-      return '재생 오류';
-  }
-}
-
 function PlayerInner() {
   const params = useSearchParams();
   const room = params.get('room') ?? '';
@@ -103,6 +92,12 @@ function PlayerInner() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const playerRef = useRef<YTPlayer | null>(null);
   const readyRef = useRef(false);
+  // Mirror of readyRef as STATE so the track-load effect re-runs once the player
+  // becomes ready (fixes the race where room state arrives before onReady).
+  const [ready, setReady] = useState(false);
+  // Latest current track id, mirrored to a ref so the onError callback (created
+  // once) can tag the failed videoId for the server's stale-error guard.
+  const trackIdRef = useRef<string | null>(null);
   // Guard so a single playback end reports trackEnded at most once.
   const endedRef = useRef(false);
   // Last applied seek timestamp — so we only seek when the server pushes a new one.
@@ -124,10 +119,21 @@ function PlayerInner() {
       playerRef.current = new window.YT.Player(containerRef.current, {
         height: '100%',
         width: '100%',
-        playerVars: { playsinline: 1 },
+        // `origin` + `enablejsapi` make YouTube's embed referer/JS-API check pass
+        // — without them some embeddable videos wrongly fail with 150/153 from a
+        // non-standard origin. Pairs with the page Referrer-Policy header.
+        playerVars: {
+          playsinline: 1,
+          enablejsapi: 1,
+          origin: window.location.origin,
+        },
         events: {
           onReady: () => {
             readyRef.current = true;
+            setReady(true); // re-runs the track-load effect if state arrived first
+            // Apply the authoritative volume immediately (and unmute if audible);
+            // the [effectiveVolume] effect won't re-fire just because we became ready.
+            if (playerRef.current) applyVolume(playerRef.current, volumeRef.current);
           },
           onStateChange: (event) => {
             // Auto-advance: when the current video ends, tell the server.
@@ -142,12 +148,15 @@ function PlayerInner() {
             // Successful playback clears any local error banner.
             if (event.data === window.YT?.PlayerState.PLAYING) {
               setErrorCode(null);
+              // A newly-started video can reset to muted/default volume — reapply.
+              if (playerRef.current) applyVolume(playerRef.current, volumeRef.current);
             }
           },
           onError: (event) => {
-            // Surface locally + report to the room (player-only status).
+            // Surface locally + report to the room (player-only status), tagging
+            // the failed videoId so the server can ignore a stale error.
             setErrorCode(event.data);
-            void actions.playbackError(event.data);
+            void actions.playbackError(event.data, trackIdRef.current ?? undefined);
           },
         },
       });
@@ -172,8 +181,15 @@ function PlayerInner() {
   // Per-track loudness gain (absent ⇒ 1.0); attenuates the applied volume.
   const gain = currentTrack ? (trackGain[currentTrack.id] ?? 1) : 1;
 
+  // Keep the failed-error tagging ref in sync with the current track.
   useEffect(() => {
-    if (!playerRef.current || !readyRef.current || !trackId) return;
+    trackIdRef.current = trackId;
+  }, [trackId]);
+
+  // Load the current track. Depends on `ready` too so that when the room state
+  // arrives BEFORE the player is ready, becoming ready re-runs this and loads.
+  useEffect(() => {
+    if (!playerRef.current || !ready || !trackId) return;
     endedRef.current = false;
     // RESUME PLAYBACK: if the latest known position belongs to THIS track and is
     // past a small threshold, (re)load from that offset — e.g. after a Player
@@ -186,19 +202,40 @@ function PlayerInner() {
     } else {
       playerRef.current.loadVideoById(trackId);
     }
-  }, [trackId]);
+  }, [trackId, ready]);
 
   useEffect(() => {
-    if (!playerRef.current || !readyRef.current) return;
+    if (!playerRef.current || !ready) return;
     if (isPlaying) playerRef.current.playVideo();
     else playerRef.current.pauseVideo();
-  }, [isPlaying]);
+  }, [isPlaying, ready]);
+
+  // Effective applied volume (master × per-track gain), mirrored to a ref so
+  // onReady can apply it once the player exists (the effect below runs before
+  // the player is ready and otherwise never re-fires until volume/gain change).
+  const effectiveVolume = Math.max(0, Math.min(100, Math.round(volume * gain)));
+  const volumeRef = useRef(effectiveVolume);
+  useEffect(() => {
+    volumeRef.current = effectiveVolume;
+  }, [effectiveVolume]);
+
+  /** Apply the effective volume, unmuting when audible — mobile starts muted. */
+  function applyVolume(p: YTPlayer, effective: number) {
+    p.setVolume(effective);
+    // setVolume alone is silent while muted (mobile autoplay); reconcile mute.
+    // Guard the mute API defensively — never let a missing method break playback.
+    if (typeof p.isMuted !== 'function') return;
+    if (effective > 0) {
+      if (p.isMuted()) p.unMute?.();
+    } else if (!p.isMuted()) {
+      p.mute?.();
+    }
+  }
 
   useEffect(() => {
     if (!playerRef.current || !readyRef.current) return;
-    const effective = Math.max(0, Math.min(100, Math.round(volume * gain)));
-    playerRef.current.setVolume(effective);
-  }, [volume, gain]);
+    applyVolume(playerRef.current, effectiveVolume);
+  }, [effectiveVolume]);
 
   // Report playback progress (~every 2s) while a track is loaded and ready.
   useEffect(() => {

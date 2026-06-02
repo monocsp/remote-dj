@@ -1,14 +1,17 @@
 'use client';
 
-import { type Role, generateRoomCode } from '@remote-dj/shared';
+import { LIMITS, type Role, generateRoomCode } from '@remote-dj/shared';
 import { useRouter } from 'next/navigation';
 import { type FormEvent, useState } from 'react';
+import { randomNickname } from '../lib/nickname';
 
 export default function LandingPage() {
   const router = useRouter();
   const [role, setRole] = useState<Role>('controller');
   const [roomCode, setRoomCode] = useState('');
-  const [nickname, setNickname] = useState('');
+  // Pre-fill a friendly random nickname; the user may keep, edit, or clear it
+  // (cleared = anonymous). Lazy initializer so it's picked once per mount.
+  const [nickname, setNickname] = useState(() => randomNickname());
   const [password, setPassword] = useState('');
 
   function handleSubmit(e: FormEvent) {
@@ -115,8 +118,9 @@ export default function LandingPage() {
               id="nick"
               value={nickname}
               onChange={(e) => setNickname(e.target.value)}
-              placeholder="익명"
-              className="w-full rounded-xl bg-neutral-800 px-4 py-4 text-base outline-none ring-emerald-500 focus:ring-2"
+              placeholder="비우면 익명"
+              maxLength={LIMITS.nickname}
+              className="w-full rounded-xl bg-neutral-800 px-4 py-4 text-base text-neutral-100 placeholder:text-neutral-500 outline-none ring-emerald-500 focus:ring-2"
             />
           </div>
         )}

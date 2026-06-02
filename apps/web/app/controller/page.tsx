@@ -1,11 +1,13 @@
 'use client';
 
 import { ControlPanel } from '@/components/ControlPanel';
+import { NicknameBar } from '@/components/NicknameBar';
 import { connectRoom, useConnected, useLastError } from '@/lib/roomStore';
-import { useSearchParams } from 'next/navigation';
-import { Suspense, useEffect } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
+import { Suspense, useCallback, useEffect } from 'react';
 
 function ControllerInner() {
+  const router = useRouter();
   const params = useSearchParams();
   const room = params.get('room') ?? '';
   const nick = params.get('nick') ?? undefined;
@@ -17,6 +19,19 @@ function ControllerInner() {
         : undefined;
     return connectRoom(room, 'controller', nick, password);
   }, [room, nick]);
+
+  // Persist the nickname into the URL — the effect above re-runs on `nick`
+  // change and reconnects (re-joins) with the new name.
+  const saveNick = useCallback(
+    (next: string) => {
+      const q = new URLSearchParams();
+      if (room) q.set('room', room);
+      // Empty name → omit the param entirely → anonymous.
+      if (next.trim()) q.set('nick', next.trim());
+      router.replace(`/controller?${q.toString()}`);
+    },
+    [room, router],
+  );
 
   const connected = useConnected();
   const lastError = useLastError();
@@ -40,6 +55,8 @@ function ControllerInner() {
           {connected ? '연결됨' : '연결 중…'}
         </span>
       </header>
+
+      <NicknameBar nick={nick} onSave={saveNick} />
 
       <ControlPanel variant="guest" myNick={nick} />
     </main>

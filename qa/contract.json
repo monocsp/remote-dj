@@ -7,6 +7,7 @@
     "UpdateSettings": "updateSettings",
     "EnqueueTrack": "enqueueTrack",
     "RemoveQueued": "removeQueued",
+    "JumpTo": "jumpTo",
     "NextTrack": "nextTrack",
     "TrackEnded": "trackEnded",
     "SeekTo": "seekTo",
@@ -14,8 +15,8 @@
     "PlaybackError": "playbackError",
     "SetTrackGain": "setTrackGain",
     "SetRepeat": "setRepeat",
-    "SetShuffle": "setShuffle",
-    "SetSchedule": "setSchedule"
+    "SetSchedule": "setSchedule",
+    "ShuffleQueue": "shuffleQueue"
   },
   "s2c": {
     "State": "state",

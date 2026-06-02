@@ -43,10 +43,26 @@ interface ScheduleEditorProps {
  */
 export function ScheduleEditor({ schedule, onSave }: ScheduleEditorProps) {
   const [draft, setDraft] = useState<WeeklySchedule>(defaultSchedule);
-  const [hint, setHint] = useState<string | null>(null);
+  // A blocking validation error shown inline under the button (must be fixed).
+  const [error, setError] = useState<string | null>(null);
+  // A transient save confirmation shown as a bottom snackbar that auto-dismisses
+  // — it must NOT linger, or the user keeps seeing "saved" long after saving.
+  const [toast, setToast] = useState<string | null>(null);
   useEffect(() => {
-    setDraft(schedule ?? defaultSchedule());
-  }, [schedule]);
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 2500);
+    return () => clearTimeout(t);
+  }, [toast]);
+  // Sync the local draft from the authoritative schedule ONLY when its CONTENT
+  // changes — keyed on the serialized value, not the object identity. The state
+  // arrives as fresh JSON on every socket broadcast (the Player reports progress
+  // every ~2s), so depending on the object reference would re-fire every couple
+  // seconds and clobber the user's in-progress edits. Parsing from the key uses
+  // only that dependency (no exhaustive-deps escape hatch needed).
+  const scheduleKey = schedule ? JSON.stringify(schedule) : '';
+  useEffect(() => {
+    setDraft(scheduleKey ? (JSON.parse(scheduleKey) as WeeklySchedule) : defaultSchedule());
+  }, [scheduleKey]);
 
   return (
     <section className="rounded-xl bg-neutral-900 p-4">
@@ -134,22 +150,32 @@ export function ScheduleEditor({ schedule, onSave }: ScheduleEditorProps) {
             return !isHHMM(d.start) || !isHHMM(d.end) || d.start >= d.end;
           });
           if (invalid) {
-            setHint("켜진 요일은 '켜짐' 시각이 '꺼짐'보다 빨라야 해요");
+            setError("켜진 요일은 '켜짐' 시각이 '꺼짐'보다 빨라야 해요");
             return;
           }
-          setHint(null);
+          setError(null);
           void onSave(draft).then((ack) => {
-            if (!ack.ok) setHint(ack.error ?? '저장 실패');
+            if (ack.ok) setToast('예약이 저장되었습니다');
+            else setError(ack.error ?? '저장 실패');
           });
         }}
         className="mt-3 min-h-[44px] w-full rounded-lg bg-emerald-500 px-4 text-sm font-bold text-neutral-950"
       >
         예약 저장
       </button>
-      {hint && <p className="mt-2 text-xs text-red-400">{hint}</p>}
+      {error && <p className="mt-2 text-xs text-red-400">{error}</p>}
       <p className="mt-2 text-xs text-neutral-500">
         이 기기(서버)의 시간 기준으로 자동 동작합니다.
       </p>
+
+      {/* Transient bottom snackbar — auto-dismisses (see the toast effect). */}
+      {toast && (
+        <div className="pointer-events-none fixed inset-x-0 bottom-6 z-50 flex justify-center px-4">
+          <output className="rounded-full bg-emerald-500 px-4 py-2 text-sm font-bold text-neutral-950 shadow-lg">
+            ✓ {toast}
+          </output>
+        </div>
+      )}
     </section>
   );
 }

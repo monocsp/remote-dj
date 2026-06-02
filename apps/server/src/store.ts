@@ -1,4 +1,4 @@
-import type { ActivityEntry, RoomState, Track } from '@remote-dj/shared';
+import type { ActivityEntry, RoomState } from '@remote-dj/shared';
 
 /**
  * A single room's authoritative record.
@@ -8,9 +8,6 @@ export interface RoomRecord {
   log: ActivityEntry[];
   // Server-side only: optional room password. Never put on RoomState/broadcast.
   password: string | null;
-  // Server-side only: tracks already played, used to rebuild the pool for
-  // repeat 'all'. NOT part of RoomState — never broadcast. Capped to last 100.
-  history: Track[];
 }
 
 /**
@@ -25,26 +22,28 @@ export interface RoomStore {
   listRoomCodes(): Promise<string[]>;
   patchState(roomCode: string, partial: Partial<RoomState>): Promise<RoomState>;
   appendActivity(roomCode: string, entry: ActivityEntry): Promise<void>;
-  /** Replace the room's server-only play history (capped to the last 100). */
-  setHistory(roomCode: string, history: Track[]): Promise<void>;
+  /**
+   * Backfill `detail.title` on existing log entries for `videoId` that were
+   * stamped before the title resolved. Returns true if anything changed.
+   * Goes through the store (vs. mutating record.log directly) so persistence
+   * subclasses see the change via onMutate.
+   */
+  backfillActivityTitle(roomCode: string, videoId: string, title: string): Promise<boolean>;
   deleteRoom(roomCode: string): Promise<void>;
 }
 
 /** Max activity entries retained per room; oldest are dropped past this. */
 const MAX_LOG = 200;
 
-/** Max play-history entries retained per room (for repeat 'all'). */
-const MAX_HISTORY = 100;
-
 function createInitialState(roomCode: string): RoomState {
   return {
     roomCode,
-    currentTrack: null,
-    queue: [],
+    playlist: [],
+    currentIndex: -1,
+    blockedIds: [],
     isPlaying: false,
     volume: 50,
     repeat: 'off',
-    shuffle: false,
     settings: { allowAnonymous: true },
     presence: { playerConnected: false, controllers: 0 },
     updatedAt: Date.now(),
@@ -63,7 +62,7 @@ export class InMemoryRoomStore implements RoomStore {
 
   /**
    * Hook invoked at the END of every mutating method (getOrCreate when it
-   * actually CREATES a record, patchState, appendActivity, setHistory,
+   * actually CREATES a record, patchState, appendActivity, backfillActivityTitle,
    * deleteRoom). In-memory: no-op. Subclasses override to persist.
    */
   protected onMutate(): void {}
@@ -86,6 +85,21 @@ export class InMemoryRoomStore implements RoomStore {
     if (!data || typeof data !== 'object') return;
     for (const [code, record] of Object.entries(data)) {
       if (record && typeof record === 'object' && typeof record.state === 'object') {
+        // Migrate/normalize legacy state (e.g. pre-playlist rooms with
+        // currentTrack/queue/history) so loading old .data never yields a
+        // malformed RoomState. Missing fields fall back to the initial state.
+        const raw = record.state as unknown as Record<string, unknown>;
+        record.state = {
+          ...createInitialState(code),
+          ...record.state,
+          roomCode: code,
+          playlist: Array.isArray(raw.playlist) ? (raw.playlist as RoomState['playlist']) : [],
+          currentIndex: typeof raw.currentIndex === 'number' ? (raw.currentIndex as number) : -1,
+        };
+        // Drop dead legacy fields if present.
+        const s = record.state as unknown as Record<string, unknown>;
+        for (const k of ['currentTrack', 'queue', 'history', 'shuffle']) delete s[k];
+        if (!Array.isArray(record.log)) record.log = [];
         this.rooms.set(code, record as RoomRecord);
       }
     }
@@ -99,7 +113,6 @@ export class InMemoryRoomStore implements RoomStore {
         state: createInitialState(roomCode),
         log: [],
         password: initialPassword ?? null,
-        history: [],
       };
       this.rooms.set(roomCode, record);
       this.onMutate();
@@ -139,12 +152,19 @@ export class InMemoryRoomStore implements RoomStore {
     this.onMutate();
   }
 
-  async setHistory(roomCode: string, history: Track[]): Promise<void> {
-    const record = await this.getOrCreate(roomCode);
-    // Keep only the most recent MAX_HISTORY entries (oldest-first; drop front).
-    record.history =
-      history.length > MAX_HISTORY ? history.slice(history.length - MAX_HISTORY) : history;
-    this.onMutate();
+  async backfillActivityTitle(roomCode: string, videoId: string, title: string): Promise<boolean> {
+    const record = this.rooms.get(roomCode);
+    if (!record) return false;
+    let changed = false;
+    for (const e of record.log) {
+      const d = e.detail as Record<string, unknown> | undefined;
+      if (d && d.id === videoId && (d.title === null || d.title === undefined)) {
+        e.detail = { ...d, title };
+        changed = true;
+      }
+    }
+    if (changed) this.onMutate();
+    return changed;
   }
 
   async deleteRoom(roomCode: string): Promise<void> {

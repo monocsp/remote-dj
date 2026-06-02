@@ -22,21 +22,44 @@ from contract import (
     EV_ACTIVITY_LOG,
     EV_STATE,
     JOIN,
+    JUMP_TO,
     LIMITS,
     NEXT_TRACK,
     PLAYBACK_ERROR,
     PROGRESS,
     REMOVE_QUEUED,
     SEEK_TO,
+    SHUFFLE_QUEUE,
     SET_REPEAT,
     SET_SCHEDULE,
-    SET_SHUFFLE,
     SET_TRACK_GAIN,
     SET_VOLUME,
     TOGGLE_PLAY,
     TRACK_ENDED,
     UPDATE_SETTINGS,
 )
+
+
+def _cur(state) -> dict:
+    """Current track = playlist[currentIndex] (None when idle/empty)."""
+    if not state:
+        return {}
+    pl = state.get("playlist") or []
+    idx = state.get("currentIndex", -1)
+    if idx is None or idx < 0 or idx >= len(pl):
+        return {}
+    return pl[idx] or {}
+
+
+def _upcoming(state) -> list:
+    """The slice of the playlist after the cursor (the 'queue')."""
+    if not state:
+        return []
+    pl = state.get("playlist") or []
+    idx = state.get("currentIndex", -1)
+    if idx is None or idx < 0:
+        return list(pl)
+    return pl[idx + 1 :]
 
 ROOM_CHARSET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 VALID_URL = "https://youtu.be/dQw4w9WgXcQ"
@@ -160,7 +183,7 @@ def test_TRK_03_04_valid_change(make_client):
     c.wait_event(3.0)
     st = c.last_state()
     assert st is not None
-    assert st["currentTrack"]["id"] == VALID_ID
+    assert _cur(st)["id"] == VALID_ID
     assert st["isPlaying"] is True
     track_acts = [a for a in c.activities if a["type"] == "track_change"]
     assert track_acts and track_acts[-1]["reason"] is not None
@@ -175,9 +198,9 @@ def test_TITLE_01_title_autofill(make_client):
     # No title provided: the server fills it asynchronously and re-broadcasts.
     ack = c.call(CHANGE_TRACK, {"url": VALID_URL, "reason": "분위기"})
     assert ack["ok"] is True
-    st = c.wait_for_state(lambda s: (s.get("currentTrack") or {}).get("title") == "QA Title")
+    st = c.wait_for_state(lambda s: _cur(s).get("title") == "QA Title")
     assert st is not None
-    assert st["currentTrack"]["title"] == "QA Title"
+    assert _cur(st)["title"] == "QA Title"
 
 
 # ── VOL-01/02/03: volume clamp + round ─────────────────────────────────────
@@ -221,7 +244,7 @@ def test_PLY_03b_controller_rejected_main_events(make_client):
     for event, payload in [
         (NEXT_TRACK, {}),
         (SET_REPEAT, {"mode": "all"}),
-        (SET_SHUFFLE, {"shuffle": True}),
+        (JUMP_TO, {"index": 0}),
         (SEEK_TO, {"seconds": 10}),
         (UPDATE_SETTINGS, {"settings": {"allowAnonymous": False}}),
         (SET_SCHEDULE, {"schedule": None}),
@@ -354,18 +377,18 @@ def test_QUEUE_14_enqueue_into_idle_auto_starts(make_client):
     c.join(room)
     c.states.clear()
     c.activities.clear()
-    # Fresh idle room (currentTrack null): the first enqueue auto-starts it.
+    # Fresh idle room (currentIndex -1): the first enqueue auto-starts it.
     ack = c.call(ENQUEUE_TRACK, {"url": VALID_URL})  # no reason
     assert ack["ok"] is True
     st = c.wait_for_state(
-        lambda s: (s.get("currentTrack") or {}).get("id") == VALID_ID
+        lambda s: _cur(s).get("id") == VALID_ID
         and s.get("isPlaying") is True
-        and len(s.get("queue", [])) == 0
+        and len(_upcoming(s)) == 0
     )
     assert st is not None
-    assert st["currentTrack"]["id"] == VALID_ID
+    assert _cur(st)["id"] == VALID_ID
     assert st["isPlaying"] is True
-    assert len(st["queue"]) == 0
+    assert len(_upcoming(st)) == 0
     assert any(a["type"] == "enqueue" for a in c.activities)
 
 
@@ -377,15 +400,15 @@ def test_QUEUE_01_02_enqueue_appends(make_client):
     # Establish a playing current track (A) first so the next enqueue (B) queues
     # instead of auto-starting (QUEUE-14).
     assert c.call(CHANGE_TRACK, {"url": VALID_URL, "reason": "A"})["ok"] is True
-    c.wait_for_state(lambda s: (s.get("currentTrack") or {}).get("id") == VALID_ID)
+    c.wait_for_state(lambda s: _cur(s).get("id") == VALID_ID)
     c.states.clear()
     c.activities.clear()
     ack = c.call(ENQUEUE_TRACK, {"url": SECOND_URL})  # no reason
     assert ack["ok"] is True
-    st = c.wait_for_state(lambda s: any(t["id"] == SECOND_ID for t in s.get("queue", [])))
+    st = c.wait_for_state(lambda s: any(t["id"] == SECOND_ID for t in _upcoming(s)))
     assert st is not None
-    assert any(t["id"] == SECOND_ID for t in st["queue"])
-    assert st["currentTrack"]["id"] == VALID_ID  # currentTrack unchanged (A)
+    assert any(t["id"] == SECOND_ID for t in _upcoming(st))
+    assert _cur(st)["id"] == VALID_ID  # current unchanged (A)
     enq = [a for a in c.activities if a["type"] == "enqueue"]
     assert enq and enq[-1]["reason"] is None  # QUEUE-02: optional reason
 
@@ -394,7 +417,7 @@ def test_QUEUE_01_02_enqueue_appends(make_client):
 def test_QUEUE_06_remove_out_of_range(make_client):
     p = make_client()
     room = room_code()
-    p.join(room, role="player")  # removeQueued is a MAIN action: player-only
+    p.join(room, role="player")  # player may remove any item
     ack = p.call(REMOVE_QUEUED, {"index": 5})
     assert ack["ok"] is False
     assert ack.get("error") == "invalid index"
@@ -407,17 +430,17 @@ def test_QUEUE_07_next_track_advances(make_client):
     c.join(room, role="player")  # nextTrack is a MAIN action: player-only
     # A becomes current (auto-start); B then queues behind it.
     assert c.call(ENQUEUE_TRACK, {"url": VALID_URL})["ok"] is True
-    c.wait_for_state(lambda s: (s.get("currentTrack") or {}).get("id") == VALID_ID)
+    c.wait_for_state(lambda s: _cur(s).get("id") == VALID_ID)
     assert c.call(ENQUEUE_TRACK, {"url": SECOND_URL})["ok"] is True
-    c.wait_for_state(lambda s: any(t["id"] == SECOND_ID for t in s.get("queue", [])))
+    c.wait_for_state(lambda s: any(t["id"] == SECOND_ID for t in _upcoming(s)))
     c.states.clear()
     c.activities.clear()
     ack = c.call(NEXT_TRACK, {})
     assert ack["ok"] is True
-    st = c.wait_for_state(lambda s: (s.get("currentTrack") or {}).get("id") == SECOND_ID)
+    st = c.wait_for_state(lambda s: _cur(s).get("id") == SECOND_ID)
     assert st is not None
-    assert st["currentTrack"]["id"] == SECOND_ID
-    assert len(st["queue"]) == 0
+    assert _cur(st)["id"] == SECOND_ID
+    assert len(_upcoming(st)) == 0
     assert st["isPlaying"] is True
     assert any(a["type"] == "skip" for a in c.activities)
 
@@ -443,17 +466,17 @@ def test_QUEUE_09_track_ended_advances(make_client):
     player.join(room, role="player")
     # A becomes current (auto-start); B then queues behind it.
     assert controller.call(ENQUEUE_TRACK, {"url": VALID_URL})["ok"] is True
-    player.wait_for_state(lambda s: (s.get("currentTrack") or {}).get("id") == VALID_ID)
+    player.wait_for_state(lambda s: _cur(s).get("id") == VALID_ID)
     assert controller.call(ENQUEUE_TRACK, {"url": SECOND_URL})["ok"] is True
-    player.wait_for_state(lambda s: any(t["id"] == SECOND_ID for t in s.get("queue", [])))
+    player.wait_for_state(lambda s: any(t["id"] == SECOND_ID for t in _upcoming(s)))
     player.states.clear()
     player.activities.clear()
     ack = player.call(TRACK_ENDED, {})
     assert ack["ok"] is True
-    st = player.wait_for_state(lambda s: (s.get("currentTrack") or {}).get("id") == SECOND_ID)
+    st = player.wait_for_state(lambda s: _cur(s).get("id") == SECOND_ID)
     assert st is not None
-    assert st["currentTrack"]["id"] == SECOND_ID
-    assert len(st["queue"]) == 0
+    assert _cur(st)["id"] == SECOND_ID
+    assert len(_upcoming(st)) == 0
     skips = [a for a in player.activities if a["type"] == "skip"]
     assert skips and skips[-1].get("detail", {}).get("auto") is True
 
@@ -486,16 +509,16 @@ def test_NEXT_PLAYER_player_can_advance(make_client):
     player.join(room, role="player")
     # A becomes current (auto-start); B then queues behind it.
     assert controller.call(ENQUEUE_TRACK, {"url": VALID_URL})["ok"] is True
-    player.wait_for_state(lambda s: (s.get("currentTrack") or {}).get("id") == VALID_ID)
+    player.wait_for_state(lambda s: _cur(s).get("id") == VALID_ID)
     assert controller.call(ENQUEUE_TRACK, {"url": SECOND_URL})["ok"] is True
-    player.wait_for_state(lambda s: any(t["id"] == SECOND_ID for t in s.get("queue", [])))
+    player.wait_for_state(lambda s: any(t["id"] == SECOND_ID for t in _upcoming(s)))
     player.states.clear()
     ack = player.call(NEXT_TRACK, {})
     assert ack["ok"] is True
-    st = player.wait_for_state(lambda s: (s.get("currentTrack") or {}).get("id") == SECOND_ID)
+    st = player.wait_for_state(lambda s: _cur(s).get("id") == SECOND_ID)
     assert st is not None
-    assert st["currentTrack"]["id"] == SECOND_ID
-    assert len(st["queue"]) == 0
+    assert _cur(st)["id"] == SECOND_ID
+    assert len(_upcoming(st)) == 0
 
 
 # ── QUEUE-12: trackEnded is player only (controller rejected) ───────────────
@@ -556,7 +579,7 @@ def test_SEEK_06_progress_updates_state_no_log(make_client):
     player.join(room, role="player")
     # Set a current track so progress is stamped with its id.
     assert controller.call(CHANGE_TRACK, {"url": VALID_URL, "reason": "곡"})["ok"] is True
-    player.wait_for_state(lambda s: (s.get("currentTrack") or {}).get("id") == VALID_ID)
+    player.wait_for_state(lambda s: _cur(s).get("id") == VALID_ID)
     controller.states.clear()
     controller.activities.clear()
     ack = player.call(PROGRESS, {"currentTime": 12, "duration": 200})
@@ -634,7 +657,7 @@ def test_SET_03_named_change_track_ok(make_client):
     ack = named.call(CHANGE_TRACK, {"url": VALID_URL, "reason": "i have a nickname"})
     assert ack["ok"] is True
     named.wait_event(3.0)
-    assert named.last_state()["currentTrack"]["id"] == VALID_ID
+    assert _cur(named.last_state())["id"] == VALID_ID
 
 
 # ── SET-04: setVolume from an anon controller is NOT gated (no lockout) ──────
@@ -665,19 +688,19 @@ def test_ERR_01_playback_error_auto_skips(make_client):
     room = room_code()
     controller.join(room)
     player.join(room, role="player")
-    # A becomes current; B queues behind it → queue = [B].
+    # A becomes current; B queues behind it → upcoming = [B].
     assert controller.call(CHANGE_TRACK, {"url": VALID_URL, "reason": "A"})["ok"] is True
-    player.wait_for_state(lambda s: (s.get("currentTrack") or {}).get("id") == VALID_ID)
+    player.wait_for_state(lambda s: _cur(s).get("id") == VALID_ID)
     assert controller.call(ENQUEUE_TRACK, {"url": SECOND_URL})["ok"] is True
-    player.wait_for_state(lambda s: any(t["id"] == SECOND_ID for t in s.get("queue", [])))
+    player.wait_for_state(lambda s: any(t["id"] == SECOND_ID for t in _upcoming(s)))
     controller.states.clear()
     controller.activities.clear()
     # The bad current track errors → server auto-skips to B and logs an 'error'.
     ack = player.call(PLAYBACK_ERROR, {"code": 150})
     assert ack["ok"] is True
-    st = controller.wait_for_state(lambda s: (s.get("currentTrack") or {}).get("id") == SECOND_ID)
+    st = controller.wait_for_state(lambda s: _cur(s).get("id") == SECOND_ID)
     assert st is not None
-    assert st["currentTrack"]["id"] == SECOND_ID
+    assert _cur(st)["id"] == SECOND_ID
     errors = [a for a in controller.activities if a["type"] == "error"]
     assert errors and errors[-1].get("detail", {}).get("code") == 150
 
@@ -689,9 +712,9 @@ def test_ERR_02_playback_error_empty_queue_stops(make_client):
     room = room_code()
     controller.join(room)
     player.join(room, role="player")
-    # A becomes current with an empty queue.
+    # A becomes current with no upcoming tracks.
     assert controller.call(CHANGE_TRACK, {"url": VALID_URL, "reason": "A"})["ok"] is True
-    player.wait_for_state(lambda s: (s.get("currentTrack") or {}).get("id") == VALID_ID)
+    player.wait_for_state(lambda s: _cur(s).get("id") == VALID_ID)
     controller.states.clear()
     controller.activities.clear()
     ack = player.call(PLAYBACK_ERROR, {"code": 2})
@@ -743,37 +766,40 @@ def test_RT_06_reconnect_resync(make_client):
     # A brand-new socket joins the same room and must receive the latest state.
     b = make_client()
     b.join(room)
-    st = b.wait_for_state(lambda s: (s.get("currentTrack") or {}).get("id") == VALID_ID)
+    st = b.wait_for_state(lambda s: _cur(s).get("id") == VALID_ID)
     assert st is not None
-    assert st["currentTrack"]["id"] == VALID_ID
+    assert _cur(st)["id"] == VALID_ID
     # The full activity log delivered on join includes the track_change.
     b.wait_event(2.0)
     assert b.activity_log is not None
     assert any(e["type"] == "track_change" for e in b.activity_log)
 
 
-# ── QUEUE-13: removeQueued at index 0 drops head, keeps the rest ────────────
+# ── QUEUE-13: removeQueued drops a queued item, keeps the rest ──────────────
 def test_QUEUE_13_remove_queued_happy_path(make_client):
     third_url = "https://youtu.be/3JZ_D3ELwOQ"
     third_id = "3JZ_D3ELwOQ"
     c = make_client()
     room = room_code()
-    c.join(room, role="player")  # removeQueued is a MAIN action: player-only
-    # A becomes current (auto-start via changeTrack); B and C then queue → [B, C].
+    c.join(room, role="player")  # player may remove any item
+    # A becomes current (auto-start via changeTrack); B and C then queue.
+    # playlist = [A, B, C], currentIndex 0, upcoming = [B, C].
     assert c.call(CHANGE_TRACK, {"url": VALID_URL, "reason": "A"})["ok"] is True
-    c.wait_for_state(lambda s: (s.get("currentTrack") or {}).get("id") == VALID_ID)
+    c.wait_for_state(lambda s: _cur(s).get("id") == VALID_ID)
     assert c.call(ENQUEUE_TRACK, {"url": SECOND_URL})["ok"] is True
     assert c.call(ENQUEUE_TRACK, {"url": third_url})["ok"] is True
-    c.wait_for_state(
-        lambda s: len(s.get("queue", [])) == 2 and s["queue"][1]["id"] == third_id
+    seeded = c.wait_for_state(
+        lambda s: len(_upcoming(s)) == 2 and _upcoming(s)[1]["id"] == third_id
     )
+    cur_idx = seeded["currentIndex"]
     c.states.clear()
-    ack = c.call(REMOVE_QUEUED, {"index": 0})
+    # Remove B at its playlist index (currentIndex + 1).
+    ack = c.call(REMOVE_QUEUED, {"index": cur_idx + 1})
     assert ack["ok"] is True
-    st = c.wait_for_state(lambda s: len(s.get("queue", [])) == 1)
+    st = c.wait_for_state(lambda s: len(_upcoming(s)) == 1)
     assert st is not None
-    assert len(st["queue"]) == 1
-    assert st["queue"][0]["id"] == third_id
+    assert len(_upcoming(st)) == 1
+    assert _upcoming(st)[0]["id"] == third_id
 
 
 # ── RMOWN: a controller may remove a queued item it added (ownership) ───────
@@ -785,16 +811,17 @@ def test_RMOWN_controller_removes_own(make_client):
     player.join(room, role="player")
     # Establish a playing current track so the next enqueue queues.
     assert a.call(CHANGE_TRACK, {"url": VALID_URL, "reason": "A"})["ok"] is True
-    player.wait_for_state(lambda s: (s.get("currentTrack") or {}).get("id") == VALID_ID)
+    player.wait_for_state(lambda s: _cur(s).get("id") == VALID_ID)
     assert a.call(ENQUEUE_TRACK, {"url": SECOND_URL})["ok"] is True
-    st = player.wait_for_state(lambda s: any(t["id"] == SECOND_ID for t in s.get("queue", [])))
+    st = player.wait_for_state(lambda s: any(t["id"] == SECOND_ID for t in _upcoming(s)))
     assert st is not None
     # The enqueued item is owned by A's socket.
-    assert st["queue"][0]["ownerId"] == a.sio.get_sid()
+    b_idx = st["currentIndex"] + 1
+    assert st["playlist"][b_idx]["ownerId"] == a.sio.get_sid()
     # A removes its own item → ok.
-    ack = a.call(REMOVE_QUEUED, {"index": 0})
+    ack = a.call(REMOVE_QUEUED, {"index": b_idx})
     assert ack["ok"] is True
-    st = player.wait_for_state(lambda s: len(s.get("queue", [])) == 0)
+    st = player.wait_for_state(lambda s: len(_upcoming(s)) == 0)
     assert st is not None
 
 
@@ -808,11 +835,12 @@ def test_RMOTHER_controller_cannot_remove_other(make_client):
     b.join(room, role="controller")
     player.join(room, role="player")
     assert a.call(CHANGE_TRACK, {"url": VALID_URL, "reason": "A"})["ok"] is True
-    player.wait_for_state(lambda s: (s.get("currentTrack") or {}).get("id") == VALID_ID)
+    player.wait_for_state(lambda s: _cur(s).get("id") == VALID_ID)
     assert a.call(ENQUEUE_TRACK, {"url": SECOND_URL})["ok"] is True
-    player.wait_for_state(lambda s: any(t["id"] == SECOND_ID for t in s.get("queue", [])))
+    st = player.wait_for_state(lambda s: any(t["id"] == SECOND_ID for t in _upcoming(s)))
+    b_idx = st["currentIndex"] + 1
     # B did not add it → rejected.
-    ack = b.call(REMOVE_QUEUED, {"index": 0})
+    ack = b.call(REMOVE_QUEUED, {"index": b_idx})
     assert ack["ok"] is False
     assert ack.get("error") == "not your item"
 
@@ -825,13 +853,14 @@ def test_RMPLAYER_player_removes_any(make_client):
     controller.join(room, role="controller")
     player.join(room, role="player")
     assert controller.call(CHANGE_TRACK, {"url": VALID_URL, "reason": "A"})["ok"] is True
-    player.wait_for_state(lambda s: (s.get("currentTrack") or {}).get("id") == VALID_ID)
+    player.wait_for_state(lambda s: _cur(s).get("id") == VALID_ID)
     assert controller.call(ENQUEUE_TRACK, {"url": SECOND_URL})["ok"] is True
-    player.wait_for_state(lambda s: any(t["id"] == SECOND_ID for t in s.get("queue", [])))
+    st = player.wait_for_state(lambda s: any(t["id"] == SECOND_ID for t in _upcoming(s)))
+    b_idx = st["currentIndex"] + 1
     # The player (main) may remove any item, even one added by a controller.
-    ack = player.call(REMOVE_QUEUED, {"index": 0})
+    ack = player.call(REMOVE_QUEUED, {"index": b_idx})
     assert ack["ok"] is True
-    st = player.wait_for_state(lambda s: len(s.get("queue", [])) == 0)
+    st = player.wait_for_state(lambda s: len(_upcoming(s)) == 0)
     assert st is not None
 
 
@@ -870,7 +899,7 @@ def test_SEC_01_password_not_in_state(make_client):
     assert observer.join(room, role="player", password="secret")["ok"] is True
     # Trigger another broadcast to exercise more than the join state.
     assert creator.call(CHANGE_TRACK, {"url": VALID_URL, "reason": "분위기"})["ok"] is True
-    observer.wait_for_state(lambda s: (s.get("currentTrack") or {}).get("id") == VALID_ID)
+    observer.wait_for_state(lambda s: _cur(s).get("id") == VALID_ID)
     assert observer.states  # received at least one state
     for s in observer.states:
         assert "password" not in s
@@ -925,20 +954,53 @@ def test_MODE_01_set_repeat_broadcasts_and_logs(make_client):
     assert modes and modes[-1].get("detail", {}).get("repeat") == "all"
 
 
-# ── MODE-02: setShuffle broadcasts state.shuffle ────────────────────────────
-def test_MODE_02_set_shuffle_broadcasts(make_client):
+# ── JUMP-01/02/03: jumpTo is player-only, range-checked, sets currentIndex ──
+def test_JUMP_01_player_jumps_to_index(make_client):
+    p = make_client()
+    room = room_code()
+    assert p.join(room, role="player")["ok"] is True
+    # Seed playlist [A, B, C], currentIndex 0.
+    assert p.call(CHANGE_TRACK, {"url": VALID_URL, "reason": "A"})["ok"] is True
+    p.wait_for_state(lambda s: _cur(s).get("id") == VALID_ID)
+    assert p.call(ENQUEUE_TRACK, {"url": SECOND_URL})["ok"] is True
+    third_url = "https://youtu.be/3JZ_D3ELwOQ"
+    third_id = "3JZ_D3ELwOQ"
+    assert p.call(ENQUEUE_TRACK, {"url": third_url})["ok"] is True
+    p.wait_for_state(lambda s: len(s.get("playlist", [])) == 3)
+    p.states.clear()
+    p.activities.clear()
+    # Player jumps to the last index (C).
+    ack = p.call(JUMP_TO, {"index": 2})
+    assert ack["ok"] is True
+    st = p.wait_for_state(lambda s: s.get("currentIndex") == 2)
+    assert st is not None
+    assert st["currentIndex"] == 2
+    assert _cur(st)["id"] == third_id
+    assert st["isPlaying"] is True
+    assert any(a["type"] == "track_change" for a in p.activities)
+
+
+def test_JUMP_02_controller_rejected_player_only(make_client):
     c = make_client()
     room = room_code()
-    c.join(room, role="player")  # setShuffle is a MAIN action: player-only
-    c.states.clear()
-    ack = c.call(SET_SHUFFLE, {"shuffle": True})
-    assert ack["ok"] is True
-    st = c.wait_for_state(lambda s: s.get("shuffle") is True)
-    assert st is not None
-    assert st["shuffle"] is True
+    assert c.join(room, role="controller")["ok"] is True
+    ack = c.call(JUMP_TO, {"index": 0})
+    assert ack["ok"] is False
+    assert ack.get("error") == "player only"
 
 
-# ── REPEAT-ALL: empty queue under repeat 'all' loops back from history ──────
+def test_JUMP_03_out_of_range_rejected(make_client):
+    p = make_client()
+    room = room_code()
+    assert p.join(room, role="player")["ok"] is True
+    assert p.call(CHANGE_TRACK, {"url": VALID_URL, "reason": "A"})["ok"] is True
+    p.wait_for_state(lambda s: _cur(s).get("id") == VALID_ID)
+    ack = p.call(JUMP_TO, {"index": 9})
+    assert ack["ok"] is False
+    assert ack.get("error") == "invalid index"
+
+
+# ── REPEAT-ALL: at-end advance under repeat 'all' wraps to the start ────────
 def test_REPEAT_ALL_loops_from_history(make_client):
     controller = make_client()
     player = make_client()
@@ -947,24 +1009,25 @@ def test_REPEAT_ALL_loops_from_history(make_client):
     player.join(room, role="player")
     assert player.call(SET_REPEAT, {"mode": "all"})["ok"] is True  # main: player-only
     assert controller.call(CHANGE_TRACK, {"url": VALID_URL, "reason": "A"})["ok"] is True
-    player.wait_for_state(lambda s: (s.get("currentTrack") or {}).get("id") == VALID_ID)
+    player.wait_for_state(lambda s: _cur(s).get("id") == VALID_ID)
     assert controller.call(ENQUEUE_TRACK, {"url": SECOND_URL})["ok"] is True
+    # playlist = [A, B], currentIndex 0.
 
-    # First trackEnded promotes B; A moves into server-only history.
+    # First trackEnded advances the cursor to B (last index).
     assert player.call(TRACK_ENDED, {})["ok"] is True
     st = player.wait_for_state(
-        lambda s: (s.get("currentTrack") or {}).get("id") == SECOND_ID
-        and len(s.get("queue", [])) == 0
+        lambda s: _cur(s).get("id") == SECOND_ID and len(_upcoming(s)) == 0
     )
     assert st is not None
 
-    # Second trackEnded: empty queue + repeat 'all' loops back to A.
+    # Second trackEnded: at end + repeat 'all' wraps the cursor back to A.
     assert player.call(TRACK_ENDED, {})["ok"] is True
     st = player.wait_for_state(
-        lambda s: (s.get("currentTrack") or {}).get("id") == VALID_ID and s.get("isPlaying") is True
+        lambda s: _cur(s).get("id") == VALID_ID and s.get("isPlaying") is True
     )
     assert st is not None
-    assert st["currentTrack"]["id"] == VALID_ID
+    assert _cur(st)["id"] == VALID_ID
+    assert st["currentIndex"] == 0
     assert st["isPlaying"] is True
 
 
@@ -978,16 +1041,15 @@ def test_OFF_STOP_stops_on_empty_queue(make_client):
     # repeat defaults to 'off'.
     assert controller.call(CHANGE_TRACK, {"url": VALID_URL, "reason": "A"})["ok"] is True
     player.wait_for_state(
-        lambda s: (s.get("currentTrack") or {}).get("id") == VALID_ID and s.get("isPlaying") is True
+        lambda s: _cur(s).get("id") == VALID_ID and s.get("isPlaying") is True
     )
     assert player.call(TRACK_ENDED, {})["ok"] is True
     st = player.wait_for_state(
-        lambda s: s.get("isPlaying") is False
-        and (s.get("currentTrack") or {}).get("id") == VALID_ID
+        lambda s: s.get("isPlaying") is False and _cur(s).get("id") == VALID_ID
     )
     assert st is not None
     assert st["isPlaying"] is False
-    assert st["currentTrack"]["id"] == VALID_ID
+    assert _cur(st)["id"] == VALID_ID
 
 
 # ── SCHED-xx: weekly play schedule ──────────────────────────────────────────
@@ -1050,3 +1112,137 @@ def test_SCHED_06_set_schedule_player_only(make_client):
     ack = c.call(SET_SCHEDULE, {"schedule": _mon_schedule()})
     assert ack["ok"] is False
     assert ack.get("error") == "player only"
+
+
+VALID_URL2 = "https://youtu.be/9bZkp7q19f0"
+VALID_ID2 = "9bZkp7q19f0"
+
+
+# ── DEQ-01: dequeue activity records WHICH track was removed (title/id) ──────
+def test_DEQ_01_dequeue_detail_has_track(make_client):
+    c = make_client()
+    room = room_code()
+    assert c.join(room, role="player")["ok"] is True  # player may remove any item
+    # First enqueue auto-starts (current); the second sits upcoming.
+    assert c.call(ENQUEUE_TRACK, {"url": VALID_URL})["ok"] is True
+    assert c.call(ENQUEUE_TRACK, {"url": VALID_URL2})["ok"] is True
+    c.wait_for_state(lambda s: len(_upcoming(s)) >= 1)
+    c.activities.clear()
+    # Remove the upcoming one at its playlist index (currentIndex + 1).
+    st = c.last_state()
+    assert st is not None and len(_upcoming(st)) >= 1
+    ack = c.call(REMOVE_QUEUED, {"index": st["currentIndex"] + 1})
+    assert ack["ok"] is True
+    c.wait_event(3.0)
+    dq = [a for a in c.activities if a["type"] == "dequeue"]
+    assert dq, "expected a dequeue activity"
+    assert "id" in (dq[-1].get("detail") or {})
+
+
+# ── SHUF: one-shot queue shuffle (shuffleQueue) ────────────────────────────
+def _ids(n: int) -> list[str]:
+    base = "abcdefghijkmnpqrstuvwxyz0123456789"
+    return ["".join(base[(i * 7 + j) % len(base)] for j in range(11)) for i in range(n)]
+
+
+def _seed_queue(player, room: str, ids: list[str]) -> None:
+    """Play the first id (current), enqueue the rest so they sit upcoming.
+
+    FAKE_TITLE makes the embeddable check pass without network for any url.
+    """
+    first, *rest = ids
+    assert player.call(CHANGE_TRACK, {"url": f"https://youtu.be/{first}", "reason": "현재"})["ok"]
+    for vid in rest:
+        assert player.call(ENQUEUE_TRACK, {"url": f"https://youtu.be/{vid}"})["ok"]
+    player.wait_for_state(lambda s: len(_upcoming(s)) >= len(rest))
+
+
+# ── SHUF-01: shuffleQueue is player only (controller rejected) ─────────────
+def test_SHUF_01_shuffle_queue_player_only(make_client):
+    c = make_client()
+    room = room_code()
+    assert c.join(room)["ok"] is True
+    ack = c.call(SHUFFLE_QUEUE, {})
+    assert ack["ok"] is False
+    assert ack.get("error") == "player only"
+
+
+# ── SHUF-02: shuffle preserves played+current prefix + the upcoming SET ─────
+def test_SHUF_02_shuffle_preserves_set_and_current(make_client):
+    p = make_client()
+    room = room_code()
+    assert p.join(room, role="player")["ok"] is True
+    ids = _ids(6)
+    _seed_queue(p, room, ids)
+
+    before = p.last_state()
+    cur_idx = before["currentIndex"]
+    # Prefix = everything up to and including the current track (played + current).
+    prefix_before = [t["id"] for t in before["playlist"][: cur_idx + 1]]
+    upcoming_before = sorted(t["id"] for t in _upcoming(before))
+
+    p.states.clear()
+    assert p.call(SHUFFLE_QUEUE, {})["ok"] is True
+    after = p.wait_for_state(lambda s: any(a["type"] == "mode" for a in p.activities) or True)
+    after = p.last_state()
+    after_cur_idx = after["currentIndex"]
+    prefix_after = [t["id"] for t in after["playlist"][: after_cur_idx + 1]]
+    # The played+current prefix is untouched (same ids, same order, same cursor).
+    assert after_cur_idx == cur_idx
+    assert prefix_after == prefix_before
+    # The upcoming set is preserved (only reordered).
+    assert sorted(t["id"] for t in _upcoming(after)) == upcoming_before
+
+
+# ── SHUF-03: shuffling with <2 upcoming is a harmless no-op ack ─────────────
+def test_SHUF_03_shuffle_short_queue_noop(make_client):
+    p = make_client()
+    room = room_code()
+    assert p.join(room, role="player")["ok"] is True
+    # No current, nothing upcoming.
+    assert p.call(SHUFFLE_QUEUE, {})["ok"] is True
+
+
+# ── ENQTITLE: enqueue activity title is backfilled once YouTube resolves it ──
+def test_ENQTITLE_activity_title_backfilled(make_client):
+    c = make_client()
+    room = room_code()
+    assert c.join(room)["ok"] is True
+    # No title supplied → enqueue logs title:null, then enrichTitle backfills it
+    # (FAKE_TITLE='QA Title') and re-emits the full activity log.
+    assert c.call(ENQUEUE_TRACK, {"url": VALID_URL})["ok"] is True
+    deadline = time.monotonic() + 4.0
+    found = None
+    while time.monotonic() < deadline:
+        for e in c.activity_log or []:
+            if e.get("type") == "enqueue" and (e.get("detail") or {}).get("title") == "QA Title":
+                found = e
+                break
+        if found:
+            break
+        c.wait_event(1.0)
+    assert found is not None, "enqueue activity title should backfill to 'QA Title'"
+
+
+# ── ERRBLOCK: embed error blocklists the video (auto-skip + re-add blocked) ──
+def test_ERRBLOCK_embed_error_blocks_and_skips(make_client):
+    p = make_client()
+    room = room_code()
+    assert p.join(room, role="player")["ok"] is True
+    # A becomes current; B is appended after it.
+    assert p.call(CHANGE_TRACK, {"url": VALID_URL, "reason": "a"})["ok"] is True
+    p.wait_for_state(lambda s: _cur(s).get("id") == VALID_ID)
+    assert p.call(ENQUEUE_TRACK, {"url": SECOND_URL})["ok"] is True
+    p.wait_for_state(lambda s: SECOND_ID in [t["id"] for t in (s.get("playlist") or [])])
+
+    # Player reports an embed-disabled error (150) for the current track A →
+    # A is blocklisted and the cursor advances to B.
+    p.states.clear()
+    assert p.call(PLAYBACK_ERROR, {"code": 150, "id": VALID_ID})["ok"] is True
+    assert p.wait_for_state(lambda s: _cur(s).get("id") == SECOND_ID) is not None
+
+    # Re-adding A is now rejected at the controller (per-room blocklist).
+    ack = p.call(CHANGE_TRACK, {"url": VALID_URL, "reason": "again"})
+    assert ack["ok"] is False and ack.get("error") == "embed disabled"
+    ack2 = p.call(ENQUEUE_TRACK, {"url": VALID_URL})
+    assert ack2["ok"] is False and ack2.get("error") == "embed disabled"
