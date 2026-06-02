@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # Fast gate: types + lint + white-box unit/integration tests.
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Verify protocol contract is committed (no drift)
+        run: |
+          npm run contract:export
+          git diff --exit-code qa/contract.json \
+            || (echo "::error::qa/contract.json is stale — run 'npm run contract:export' and commit it." && exit 1)
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Biome (format + lint)
+        run: npx @biomejs/biome ci .
+      - name: ESLint (web)
+        run: npm run lint -w apps/web
+      - name: Unit + integration tests (Vitest)
+        run: npm test
+
+  # Black-box web acceptance tests (Playwright, multi-context). Boots the whole
+  # app (server :3001 + web :3000) via the Playwright webServer.
+  e2e-web:
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        id: pw-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: pw-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+      - name: Install Playwright (chromium)
+        if: steps.pw-cache.outputs.cache-hit != 'true'
+        run: npx playwright install --with-deps chromium
+      - name: Run web E2E
+        run: npm run e2e -w apps/web
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: apps/web/playwright-report/
+          retention-days: 7
+
+  # Black-box server acceptance tests (Python python-socketio, different runtime
+  # — physically cannot import app internals). Reads qa/contract.json.
+  qa-server:
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Export protocol contract
+        run: npm run contract:export
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Python harness deps
+        run: pip install -r qa/server/requirements.txt
+      - name: Run server black-box tests
+        run: pytest -q
+        working-directory: qa/server
