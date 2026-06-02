@@ -1,0 +1,49 @@
+name: Nightly (realtime)
+
+# Longer-running realtime checks that don't belong on every PR: the full test
+# matrix plus a home for soak / room-TTL / reconnect-chaos suites (see
+# docs/TESTING.md §2/§4). Runs nightly and on demand.
+on:
+  schedule:
+    - cron: '0 18 * * *' # 03:00 KST
+  workflow_dispatch:
+
+jobs:
+  realtime:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+
+      - name: Typecheck + lint
+        run: |
+          npm run typecheck
+          npx @biomejs/biome ci .
+          npm run lint -w apps/web
+
+      - name: Unit + integration (Vitest)
+        run: npm test
+
+      - name: Web E2E (Playwright)
+        run: |
+          npx playwright install --with-deps chromium
+          npm run e2e -w apps/web
+
+      - name: Export protocol contract
+        run: npm run contract:export
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Server black-box (Python)
+        run: |
+          pip install -r requirements.txt
+          pytest -q
+        working-directory: qa/server
+
+      # TODO(docs/TESTING.md §4): add dedicated soak/memory, room-TTL expiry,
+      # and reconnect-chaos suites here once written (they need long timers /
+      # injected TTL, so they live in nightly rather than the per-PR gate).

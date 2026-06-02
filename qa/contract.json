@@ -1,0 +1,33 @@
+{
+  "c2s": {
+    "Join": "join",
+    "ChangeTrack": "changeTrack",
+    "SetVolume": "setVolume",
+    "TogglePlay": "togglePlay",
+    "UpdateSettings": "updateSettings",
+    "EnqueueTrack": "enqueueTrack",
+    "RemoveQueued": "removeQueued",
+    "JumpTo": "jumpTo",
+    "NextTrack": "nextTrack",
+    "TrackEnded": "trackEnded",
+    "SeekTo": "seekTo",
+    "Progress": "progress",
+    "PlaybackError": "playbackError",
+    "SetTrackGain": "setTrackGain",
+    "SetRepeat": "setRepeat",
+    "SetSchedule": "setSchedule",
+    "ShuffleQueue": "shuffleQueue"
+  },
+  "s2c": {
+    "State": "state",
+    "Activity": "activity",
+    "ActivityLog": "activityLog"
+  },
+  "limits": {
+    "reason": 500,
+    "url": 2048,
+    "nickname": 40,
+    "title": 200,
+    "password": 64
+  }
+}
