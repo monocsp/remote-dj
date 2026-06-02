@@ -15,13 +15,18 @@ const SAVE_DEBOUNCE_MS = 800;
  * Note: presence fields in state may be stale on reload; that's fine — they are
  * recomputed on every broadcast. They are not special-cased here.
  */
+/** Optional hook to surface best-effort disk failures to a logger. */
+export type StoreErrorHandler = (op: 'load' | 'save', filePath: string, err: unknown) => void;
+
 export class PersistentRoomStore extends InMemoryRoomStore {
   private readonly filePath: string;
+  private readonly onError?: StoreErrorHandler;
   private saveTimer: NodeJS.Timeout | null = null;
 
-  constructor(filePath: string) {
+  constructor(filePath: string, onError?: StoreErrorHandler) {
     super();
     this.filePath = filePath;
+    this.onError = onError;
 
     // Load existing rooms (best-effort: missing/corrupt file ⇒ start empty).
     try {
@@ -32,6 +37,7 @@ export class PersistentRoomStore extends InMemoryRoomStore {
       }
     } catch (err) {
       console.warn(`[PersistentRoomStore] failed to load ${filePath}:`, err);
+      this.onError?.('load', filePath, err);
     }
 
     // Persist immediately on a clean shutdown so we don't lose the debounce window.
@@ -73,6 +79,7 @@ export class PersistentRoomStore extends InMemoryRoomStore {
       renameSync(tmp, this.filePath);
     } catch (err) {
       console.warn(`[PersistentRoomStore] failed to save ${this.filePath}:`, err);
+      this.onError?.('save', this.filePath, err);
     }
   }
 }

@@ -324,3 +324,87 @@ export function generateRoomCode(): string {
   }
   return code;
 }
+
+// ── Diagnostic logging contract (file-based ops/error logs) ───────────────────
+// Separate from the user-facing Activity Log (RoomState.activityLog). These are
+// structured JSONL records written to disk by the SERVER for debugging/tracking.
+// See docs/LOGGING.md.
+
+export const LOG_SCHEMA = 'remote-dj-log/v1' as const;
+/** HTTP path the web client POSTs runtime errors to (not a Socket.IO event). */
+export const WEB_LOG_PATH = '/internal/logs/web';
+
+export type LogStream = 'ops' | 'error';
+export type LogLevel = 'info' | 'warn' | 'error' | 'fatal';
+export type LogEnv = 'prd' | 'dev';
+export type LogSource = 'server' | 'web';
+export type LogRuntime = 'node' | 'browser' | 'next-server';
+export type LogCategory =
+  | 'room'
+  | 'playback'
+  | 'queue'
+  | 'settings'
+  | 'network'
+  | 'runtime'
+  | 'storage'
+  | 'external'
+  | 'process'
+  | 'ingest';
+
+export interface LogErrorInfo {
+  name?: string;
+  message?: string;
+  code?: string;
+  stack?: string;
+  componentStack?: string;
+  digest?: string;
+}
+
+/** A full log record as written to disk — one JSONL line. */
+export interface LogRecord {
+  schema: typeof LOG_SCHEMA;
+  stream: LogStream;
+  level: LogLevel;
+  /** server write time (ISO8601) */
+  ts: string;
+  /** actual occurrence time (ISO8601); web uses the client clock */
+  occurredAt: string;
+  env: LogEnv;
+  source: LogSource;
+  runtime: LogRuntime;
+  category: LogCategory;
+  /** dotted event id, e.g. "settings.update", "runtime.unhandled_rejection" */
+  event: string;
+  message: string;
+  requestId?: string;
+  roomCode?: string | null;
+  actorRole?: 'player' | 'controller' | null;
+  actorNickname?: string;
+  socketId?: string;
+  /** web route only; query strings are dropped */
+  route?: string;
+  /** grouping key for de-duplicating recurring errors */
+  fingerprint?: string;
+  outcome?: 'ok' | 'reject' | 'fail';
+  data?: Record<string, unknown>;
+  error?: LogErrorInfo;
+}
+
+/**
+ * Payload the web client POSTs to WEB_LOG_PATH. The server overwrites
+ * env/source/ts/requestId and never trusts client-supplied values for those.
+ */
+export interface WebLogEvent {
+  level: LogLevel;
+  category: LogCategory;
+  event: string;
+  message: string;
+  occurredAt: string;
+  route?: string;
+  roomCode?: string | null;
+  actorRole?: 'player' | 'controller' | null;
+  /** client-side de-dupe hint */
+  dedupeKey?: string;
+  error?: LogErrorInfo;
+  data?: Record<string, unknown>;
+}

@@ -37,10 +37,78 @@ import {
   validateReason,
   withinLimit,
 } from '@remote-dj/shared';
+import {
+  type LogCategory,
+  type LogErrorInfo,
+  type LogLevel,
+  WEB_LOG_PATH,
+  type WebLogEvent,
+} from '@remote-dj/shared';
 import { nanoid } from 'nanoid';
 import { Server } from 'socket.io';
+import { type Logger, createLogger, createNoopLogger } from './logger.js';
 import { PersistentRoomStore } from './persistentStore.js';
 import { InMemoryRoomStore, type RoomStore } from './store.js';
+
+/** Map an Activity Log type to a diagnostic-log category (defaults to 'room'). */
+const ACTIVITY_CATEGORY: Partial<Record<ActivityType, LogCategory>> = {
+  track_change: 'playback',
+  volume: 'playback',
+  play: 'playback',
+  pause: 'playback',
+  settings: 'settings',
+  enqueue: 'queue',
+  dequeue: 'queue',
+  skip: 'playback',
+  seek: 'playback',
+  gain: 'playback',
+  mode: 'playback',
+  schedule: 'settings',
+};
+
+/** Activity types whose ops-log mirror is throttled (slider-drag chatter). */
+const NOISY_OPS: Set<ActivityType> = new Set(['volume', 'seek', 'gain']);
+
+/** Allowlist of valid log categories (client-supplied labels are checked against this). */
+const LOG_CATEGORIES: Set<LogCategory> = new Set([
+  'room',
+  'playback',
+  'queue',
+  'settings',
+  'network',
+  'runtime',
+  'storage',
+  'external',
+  'process',
+  'ingest',
+]);
+
+/** Drop secret-ish keys from a free-form object before it touches a log file. */
+const SECRET_KEY_RE = /pass|cookie|authorization|token|secret|key|auth/i;
+function sanitizeData(data: unknown, depth = 0): Record<string, unknown> | undefined {
+  if (!data || typeof data !== 'object' || depth > 3) return undefined;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(data as Record<string, unknown>)) {
+    if (SECRET_KEY_RE.test(k)) continue;
+    if (v && typeof v === 'object') {
+      const nested = sanitizeData(v, depth + 1);
+      if (nested) out[k] = nested;
+    } else if (typeof v === 'string') {
+      // Strip query strings from URL-ish values (they can carry tokens/keys).
+      const cleaned = /url|link|href/i.test(k) ? v.split('?')[0] : v;
+      out[k] = cleaned.length > 500 ? `${cleaned.slice(0, 500)}…` : cleaned;
+    } else {
+      out[k] = v;
+    }
+  }
+  return out;
+}
+
+/** Coerce to a length-capped string, or undefined if not a non-empty string. */
+function str(v: unknown, max: number): string | undefined {
+  if (typeof v !== 'string' || v.length === 0) return undefined;
+  return v.length > max ? v.slice(0, max) : v;
+}
 
 interface SocketData {
   roomCode?: string;
@@ -297,6 +365,7 @@ export function createServer(
   resolveTitle: (url: string) => Promise<string | null> = defaultResolveTitle,
   resolveLoudness: (videoId: string) => Promise<number | null> = defaultResolveLoudness,
   resolveEmbeddable: (url: string) => Promise<boolean | null> = defaultResolveEmbeddable,
+  logger: Logger = createNoopLogger(),
 ): {
   httpServer: HttpServer;
   io: Server;
@@ -311,9 +380,165 @@ export function createServer(
       res.end('ok');
       return;
     }
+    // Web error/diagnostic ingest. The web client POSTs JSON (single object or
+    // array) here; see WEB_LOG_PATH / WebLogEvent in shared. The server is the
+    // authority for env/source/ts/requestId and never trusts client values.
+    if (req.url === WEB_LOG_PATH) {
+      // Echo the request Origin unless CORS_ORIGIN pins a specific one.
+      const configured = process.env.CORS_ORIGIN;
+      const allowOrigin =
+        configured && configured !== '*' ? configured : (req.headers.origin ?? '*');
+      const cors = {
+        'access-control-allow-origin': allowOrigin,
+        'access-control-allow-methods': 'POST, OPTIONS',
+        'access-control-allow-headers': 'content-type',
+      };
+      if (req.method === 'OPTIONS') {
+        res.writeHead(204, cors);
+        res.end();
+        return;
+      }
+      if (req.method !== 'POST') {
+        res.writeHead(405, cors);
+        res.end();
+        return;
+      }
+      let body = '';
+      let bytes = 0;
+      let tooBig = false;
+      req.on('data', (chunk: Buffer) => {
+        if (tooBig) return;
+        bytes += chunk.length; // byte length, not UTF-16 code units
+        if (bytes > 64 * 1024) {
+          tooBig = true;
+          // Send a clean 413 BEFORE destroying the socket.
+          res.writeHead(413, cors);
+          res.end();
+          req.destroy();
+          return;
+        }
+        body += chunk;
+      });
+      req.on('end', () => {
+        if (tooBig) return;
+        try {
+          const parsed = JSON.parse(body) as WebLogEvent | WebLogEvent[];
+          const events = Array.isArray(parsed) ? parsed : [parsed];
+          for (const ev of events.slice(0, 50)) ingestWebLog(ev);
+        } catch {
+          // malformed body → log the ingest failure itself, then ack anyway
+          logger.write({
+            stream: 'error',
+            level: 'warn',
+            occurredAt: new Date().toISOString(),
+            source: 'server',
+            runtime: 'node',
+            category: 'ingest',
+            event: 'ingest.bad_web_log',
+            message: 'received malformed web log payload',
+          });
+        }
+        res.writeHead(204, cors);
+        res.end();
+      });
+      return;
+    }
     res.writeHead(404, { 'content-type': 'text/plain' });
     res.end('not found');
   });
+
+  // Per-fingerprint flood control for ingested WEB errors. A render-loop or a
+  // storm across many tabs would otherwise fill the error file. We write the
+  // first FLOOD_LIMIT per FLOOD_WINDOW_MS per fingerprint, then drop the rest
+  // and emit ONE collapsed summary line when the window rolls over.
+  const FLOOD_WINDOW_MS = 60_000;
+  const FLOOD_LIMIT = 5;
+  const floodBuckets = new Map<string, { start: number; count: number; suppressed: number }>();
+  // Last ops-mirror write time per socket+type, for NOISY_OPS throttling.
+  const noisyOpsLast = new Map<string, number>();
+
+  /** @returns drop=true to suppress; flushSuppressed = count from the prior window. */
+  function floodCheck(fp: string): { drop: boolean; flushSuppressed: number } {
+    const now = Date.now();
+    if (floodBuckets.size > 1000) floodBuckets.clear(); // crude unbounded-growth guard
+    const b = floodBuckets.get(fp);
+    if (!b || now - b.start > FLOOD_WINDOW_MS) {
+      const prior = b?.suppressed ?? 0;
+      floodBuckets.set(fp, { start: now, count: 1, suppressed: 0 });
+      return { drop: false, flushSuppressed: prior };
+    }
+    b.count += 1;
+    if (b.count <= FLOOD_LIMIT) return { drop: false, flushSuppressed: 0 };
+    b.suppressed += 1;
+    return { drop: true, flushSuppressed: 0 };
+  }
+
+  /** Validate + sanitize a client-sent log event and write it to disk. */
+  function ingestWebLog(ev: WebLogEvent): void {
+    if (!ev || typeof ev !== 'object') return;
+    const level: LogLevel =
+      ev.level === 'info' || ev.level === 'warn' || ev.level === 'fatal' ? ev.level : 'error';
+    const stream = level === 'info' || level === 'warn' ? 'ops' : 'error';
+    // Validate category against the allowlist (never trust the client's label).
+    const category: LogCategory = LOG_CATEGORIES.has(ev.category as LogCategory)
+      ? (ev.category as LogCategory)
+      : 'runtime';
+    const event = str(ev.event, 120) ?? 'web.unknown';
+    const route = typeof ev.route === 'string' ? ev.route.split('?')[0].slice(0, 200) : undefined;
+    const err: LogErrorInfo | undefined = ev.error
+      ? {
+          name: str(ev.error.name, 200),
+          message: str(ev.error.message, 1000),
+          code: str(ev.error.code, 200),
+          stack: str(ev.error.stack, 8000),
+          componentStack: str(ev.error.componentStack, 8000),
+          digest: str(ev.error.digest, 200),
+        }
+      : undefined;
+    // Server-computed fingerprint when the client omits a dedupeKey — keeps the
+    // analysis grouping (docs/LOGGING.md §8) working regardless of the client.
+    const fingerprint =
+      (ev.dedupeKey ? str(ev.dedupeKey, 200) : undefined) ??
+      `web:${event}:${err?.name ?? ''}:${err?.message ?? ''}:${route ?? ''}`.slice(0, 200);
+
+    // Flood control applies to the error stream only (ops from web are rare).
+    if (stream === 'error') {
+      const { drop, flushSuppressed } = floodCheck(fingerprint);
+      if (flushSuppressed > 0) {
+        logger.write({
+          stream: 'error',
+          level: 'warn',
+          occurredAt: new Date().toISOString(),
+          source: 'server',
+          runtime: 'node',
+          category: 'ingest',
+          event: 'ingest.flood_suppressed',
+          message: `suppressed ${flushSuppressed} repeated web errors`,
+          fingerprint,
+          data: { suppressed: flushSuppressed },
+        });
+      }
+      if (drop) return;
+    }
+
+    logger.write({
+      stream,
+      level,
+      occurredAt: str(ev.occurredAt, 40) ?? new Date().toISOString(),
+      source: 'web',
+      runtime: 'browser',
+      category,
+      event,
+      message: str(ev.message, 500) ?? '',
+      requestId: `w_${nanoid(12)}`,
+      roomCode: typeof ev.roomCode === 'string' ? ev.roomCode : null,
+      actorRole: ev.actorRole === 'player' || ev.actorRole === 'controller' ? ev.actorRole : null,
+      route,
+      fingerprint,
+      data: sanitizeData(ev.data),
+      error: err,
+    });
+  }
 
   const io = new Server(httpServer, {
     cors: { origin: process.env.CORS_ORIGIN ?? '*' },
@@ -600,6 +825,39 @@ export function createServer(
       };
       await store.appendActivity(roomCode, entry);
       io.to(roomCode).emit(S2C.Activity, entry);
+
+      // High-frequency controls (a volume/seek/gain slider drag) would spam the
+      // ops file. Throttle the ops MIRROR to ~1/sec per socket+type — the
+      // user-facing Activity entry above is always kept, only the diagnostic
+      // breadcrumb is sampled. See docs/LOGGING.md §10.
+      if (NOISY_OPS.has(type)) {
+        const key = `${socket.id}:${type}`;
+        const now = Date.now();
+        const last = noisyOpsLast.get(key) ?? 0;
+        if (now - last < 1000) return;
+        noisyOpsLast.set(key, now);
+        if (noisyOpsLast.size > 2000) noisyOpsLast.clear();
+      }
+
+      // Mirror every successful mutation into the structured ops log (separate
+      // from this user-facing Activity entry) for later debugging/tracking.
+      logger.write({
+        stream: 'ops',
+        level: 'info',
+        occurredAt: new Date(entry.ts).toISOString(),
+        source: 'server',
+        runtime: 'node',
+        category: ACTIVITY_CATEGORY[type] ?? 'room',
+        event: `activity.${type}`,
+        message: `${actor ?? '익명'} ${type}`,
+        requestId: `s_${entry.id}`,
+        roomCode,
+        actorRole: data.role ?? null,
+        actorNickname: data.nickname ?? undefined,
+        socketId: socket.id,
+        outcome: 'ok',
+        data: sanitizeData(reason ? { ...detail, reason } : detail),
+      });
     }
 
     /**
@@ -670,6 +928,23 @@ export function createServer(
       const existing = await store.get(roomCode);
       if (existing && existing.password !== null) {
         if ((password ?? '').trim() !== existing.password) {
+          // Expected rejection → ops/warn (NOT the error stream), so genuine
+          // failures aren't drowned out.
+          logger.write({
+            stream: 'ops',
+            level: 'warn',
+            occurredAt: new Date().toISOString(),
+            source: 'server',
+            runtime: 'node',
+            category: 'room',
+            event: 'room.join_rejected',
+            message: `join rejected for ${roomCode}: wrong password`,
+            roomCode,
+            actorRole: role,
+            socketId: socket.id,
+            outcome: 'reject',
+            data: { reason: 'wrong_password' },
+          });
           ack({ ok: false, error: 'wrong password' });
           return;
         }
@@ -715,6 +990,21 @@ export function createServer(
 
       // Notify the rest of the room of the new presence.
       await broadcastState(roomCode);
+      logger.write({
+        stream: 'ops',
+        level: 'info',
+        occurredAt: new Date().toISOString(),
+        source: 'server',
+        runtime: 'node',
+        category: 'room',
+        event: 'room.join',
+        message: `${role} joined ${roomCode}`,
+        roomCode,
+        actorRole: role,
+        actorNickname: nickname ?? undefined,
+        socketId: socket.id,
+        outcome: 'ok',
+      });
       ack({ ok: true });
     });
 
@@ -1206,6 +1496,21 @@ export function createServer(
     socket.on('disconnect', async () => {
       const room = data.roomCode;
       if (!room) return;
+      logger.write({
+        stream: 'ops',
+        level: 'info',
+        occurredAt: new Date().toISOString(),
+        source: 'server',
+        runtime: 'node',
+        category: 'room',
+        event: 'room.leave',
+        message: `${data.role ?? 'member'} left ${room}`,
+        roomCode: room,
+        actorRole: data.role ?? null,
+        actorNickname: data.nickname ?? undefined,
+        socketId: socket.id,
+        outcome: 'ok',
+      });
       await broadcastState(room);
 
       // If the room is now empty, schedule its deletion after a grace period.
@@ -1237,11 +1542,71 @@ if (isMain) {
   }
   const dataFile =
     process.env.REMOTE_DJ_DATA_FILE ?? path.resolve(process.cwd(), '.data', 'rooms.json');
+  // Diagnostic logs live next to the data file (.data/logs) so prd/dev never
+  // share a directory and the logs survive releases like the data does. The
+  // env tag is explicit (REMOTE_DJ_ENV), never inferred.
+  const env = process.env.REMOTE_DJ_ENV === 'prd' ? 'prd' : 'dev';
+  const logRoot = path.join(path.dirname(dataFile), 'logs');
+  const logger = createLogger(logRoot, env);
+  const logProcess = (
+    level: 'info' | 'error' | 'fatal',
+    event: string,
+    message: string,
+    error?: unknown,
+  ) =>
+    logger.write({
+      stream: level === 'info' ? 'ops' : 'error',
+      level,
+      occurredAt: new Date().toISOString(),
+      source: 'server',
+      runtime: 'node',
+      category: 'process',
+      event,
+      message,
+      error:
+        error instanceof Error
+          ? { name: error.name, message: error.message, stack: error.stack }
+          : error
+            ? { message: String(error) }
+            : undefined,
+    });
+
   console.log(`remote-dj persisting room state to ${dataFile}`);
-  const { httpServer } = createServer(new PersistentRoomStore(dataFile));
+  console.log(`remote-dj logging (${env}) to ${logRoot}`);
+  const store = new PersistentRoomStore(dataFile, (op, filePath, err) =>
+    logger.write({
+      stream: 'error',
+      level: 'error',
+      occurredAt: new Date().toISOString(),
+      source: 'server',
+      runtime: 'node',
+      category: 'storage',
+      event: `storage.${op}_failed`,
+      message: `failed to ${op} ${filePath}`,
+      error: err instanceof Error ? { name: err.name, message: err.message } : undefined,
+    }),
+  );
+  const { httpServer } = createServer(store, undefined, undefined, undefined, logger);
   const port = Number(process.env.PORT ?? 3001);
   const hostname = process.env.HOSTNAME ?? '0.0.0.0';
+
+  // Last-resort crash capture → error stream (fatal). Re-throw is avoided so the
+  // record is flushed; the process may still exit on uncaughtException.
+  process.on('uncaughtException', (err) =>
+    logProcess('fatal', 'process.uncaught', String(err), err),
+  );
+  process.on('unhandledRejection', (reason) =>
+    logProcess('error', 'process.unhandled_rejection', String(reason), reason),
+  );
+  for (const sig of ['SIGINT', 'SIGTERM'] as const) {
+    process.on(sig, () => {
+      logProcess('info', 'process.stop', `received ${sig}`);
+      logger.close();
+    });
+  }
+
   httpServer.listen(port, hostname, () => {
+    logProcess('info', 'process.start', `listening on http://${hostname}:${port}`);
     console.log(`remote-dj server listening on http://${hostname}:${port}`);
   });
 }
