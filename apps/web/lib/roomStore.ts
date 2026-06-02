@@ -14,6 +14,7 @@ import {
 import { type Socket, io } from 'socket.io-client';
 import { useStore } from 'zustand';
 import { createStore } from 'zustand/vanilla';
+import { reportError, setLogContext } from './clientLog';
 import { getServerUrl } from './serverUrl';
 
 // ── Store shape ──────────────────────────────────────────────────────────
@@ -69,6 +70,9 @@ export function connectRoom(
 
   refs += 1;
 
+  // Tag client reports with this room/role so server-side logs can correlate.
+  setLogContext({ roomCode, actorRole: role === 'player' ? 'player' : 'controller' });
+
   if (!socket) {
     const s = io(getServerUrl(), { transports: ['websocket'] });
     socket = s;
@@ -82,6 +86,14 @@ export function connectRoom(
           store.setState({ synced: ack.ok, lastError: ack.error ?? null });
         })
         .catch(() => store.setState({ synced: false }));
+    });
+
+    s.on('connect_error', (err: Error) => {
+      reportError(err, {
+        event: 'network.connect_error',
+        category: 'network',
+        message: `socket connect_error: ${err.message}`,
+      });
     });
 
     s.on('disconnect', () => {

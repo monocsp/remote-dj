@@ -1,3 +1,4 @@
+import { ErrorReporter } from '@/components/ErrorReporter';
 import type { Metadata, Viewport } from 'next';
 import './globals.css';
 
@@ -18,7 +19,10 @@ export default function RootLayout({
 }) {
   return (
     <html lang="ko">
-      <body>{children}</body>
+      <body>
+        <ErrorReporter />
+        {children}
+      </body>
     </html>
   );
 }
