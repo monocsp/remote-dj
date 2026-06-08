@@ -22,7 +22,7 @@ remote-dj의 계층형 테스트 전략. Codex 객관 분석 + 프로젝트 현�
 | --- | --- | --- |
 | **매 커밋** (CI `check`) | `typecheck` + `lint`(Biome+ESLint) + `vitest`(unit+integration) | 빠른 화이트박스 게이트 |
 | **매 PR** | `e2e-web`(Playwright) + `qa-server`(Python) | 블랙박스 수용 |
-| **야간(nightly)** | 재연결/chaos · soak/memory · 룸 TTL 만료 | 장시간·드문 회귀 |
+| **야간(nightly)** | 재연결/chaos · soak/memory | 장시간·드문 회귀 (룸 TTL은 시간 주입 단위테스트로 커버) |
 
 - **계약 드리프트 차단:** CI에서 `npm run contract:export` 실행 후 `qa/contract.json` 변경 시 **실패**시킨다(커밋 누락 감지). 로컬 훅으로도 가능.
 - **플레이크 정책:** 고정 `sleep` 금지, "아무 이벤트나 대기" 금지. **항상 술어 대기** — 서버 테스트는 `waitFor(socket, event, predicate)`, Python은 `Client.wait_for_state(predicate)`. 낙관적 UI는 **서버 권위 상태가 반영된 최종 UI**를 단언하지(즉시 로컬 토글 상태가 아니라). 
@@ -47,7 +47,7 @@ remote-dj의 계층형 테스트 전략. Codex 객관 분석 + 프로젝트 현�
 - **presence**: disconnect 시 컨트롤러/Player 카운트 감소.
 - **이벤트 순서**: `activity` vs `state` emit 순서 정책 명문화 + 테스트.
 - **soak/memory**: 다수 join·progress 폭주에서 로그 캡(200) 동작, 메모리 무증가.
-- **룸 TTL**: 빈 방 삭제(5분) + 빠른 재입장 시 취소.
+- **룸 TTL**: 빈 방 7일 후 sweep 삭제(부팅 1회 + 1시간 주기). 영속 `emptySince` 타임스탬프 기반(재시작에도 유지) — `markEmpty`(마지막 퇴장)/`markOccupied`(입장)/self-heal(빈 방인데 stamp 없으면 재스탬프). `PINNED_ROOMS` 방은 면제. 테스트는 `sweepEmptyRooms(now)`에 시간 주입(벽시계 대기 없음).
 - **보안**: 어떤 `state`/브로드캐스트에도 방 password가 포함되지 않음.
 
 ## 5. 폴더/네이밍 + CI 레이아웃

@@ -8,6 +8,10 @@ export interface RoomRecord {
   log: ActivityEntry[];
   // Server-side only: optional room password. Never put on RoomState/broadcast.
   password: string | null;
+  // Server-side only: epoch-ms when the room's LAST socket left (null while
+  // occupied or unknown). Drives the empty-room sweep (see index.ts). Persisted
+  // with the record so the TTL survives restarts, unlike an in-memory timer.
+  emptySince: number | null;
 }
 
 /**
@@ -30,6 +34,10 @@ export interface RoomStore {
    */
   backfillActivityTitle(roomCode: string, videoId: string, title: string): Promise<boolean>;
   deleteRoom(roomCode: string): Promise<void>;
+  /** Stamp `emptySince` ONLY if currently null (preserves the first-empty moment). */
+  markEmpty(roomCode: string, ts: number): Promise<void>;
+  /** Clear `emptySince` back to null (room is occupied again). */
+  markOccupied(roomCode: string): Promise<void>;
 }
 
 /** Max activity entries retained per room; oldest are dropped past this. */
@@ -100,6 +108,11 @@ export class InMemoryRoomStore implements RoomStore {
         const s = record.state as unknown as Record<string, unknown>;
         for (const k of ['currentTrack', 'queue', 'history', 'shuffle']) delete s[k];
         if (!Array.isArray(record.log)) record.log = [];
+        // Legacy records (pre-sweep) have no emptySince → default to null, i.e.
+        // "occupied/unknown" so a loaded room is NEVER instantly swept; the next
+        // sweep self-heals it to a real timestamp if it's actually empty.
+        const rr = record as unknown as Record<string, unknown>;
+        record.emptySince = typeof rr.emptySince === 'number' ? (rr.emptySince as number) : null;
         this.rooms.set(code, record as RoomRecord);
       }
     }
@@ -113,6 +126,10 @@ export class InMemoryRoomStore implements RoomStore {
         state: createInitialState(roomCode),
         log: [],
         password: initialPassword ?? null,
+        // null = occupied/unknown, so a freshly created (or schedule/handler
+        // auto-created) room is NEVER instantly sweepable; the Join handler
+        // calls markOccupied and the disconnect handler stamps markEmpty.
+        emptySince: null,
       };
       this.rooms.set(roomCode, record);
       this.onMutate();
@@ -170,5 +187,23 @@ export class InMemoryRoomStore implements RoomStore {
   async deleteRoom(roomCode: string): Promise<void> {
     this.rooms.delete(roomCode);
     this.onMutate();
+  }
+
+  async markEmpty(roomCode: string, ts: number): Promise<void> {
+    const record = this.rooms.get(roomCode);
+    // Only stamp when currently null so reconnect churn doesn't keep resetting
+    // the clock — the FIRST moment the room went empty is what counts.
+    if (record && record.emptySince === null) {
+      record.emptySince = ts;
+      this.onMutate();
+    }
+  }
+
+  async markOccupied(roomCode: string): Promise<void> {
+    const record = this.rooms.get(roomCode);
+    if (record && record.emptySince !== null) {
+      record.emptySince = null;
+      this.onMutate();
+    }
   }
 }
