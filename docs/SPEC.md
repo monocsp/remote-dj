@@ -166,10 +166,12 @@ interface ActivityEntry {
 - **임베드 가능 검사(추가 시점)**: `changeTrack`/`enqueueTrack` 에서 url 파싱 후 임베드 가능 여부를 **추가 시점에 확인**하고 불가하면 `{ ok:false, error:'embed disabled' }` 로 거부한다.
   - **(A) 확정 경로 — `YOUTUBE_API_KEY` 설정 시**: YouTube Data API `videos.list?part=status` 의 `status.embeddable` 로 판정(영상 없음/임베드 비활성 → 거부). **첫 추가에서 임베드 비활성 영상을 막을 수 있는 유일한 방법.**
   - **(B) 키 없을 때 — oEmbed(3s)**: 401/404 → 거부, 200 → 통과(단 **임베드 비활성 영상은 oEmbed가 200을 반환**해 첫 추가는 통과됨), 그 외/오류/타임아웃 → fail-open.
-  - **(C) per-room 학습 차단**: Player가 재생 중 임베드 오류(코드 101/150)를 보고하면 서버는 그 `videoId` 를 **`RoomState.blockedIds`**(해당 방)에 기록한다. 이후: ① 목록 UI에 **"재생 불가"** 로 표시(흑백 썸네일·취소선, 자동 건너뜀 안내), ② `advance()` 가 그 곡을 **스킵**, ③ 같은 영상의 추가를 추가 시점에 `embed disabled` 로 거부. 방 삭제(빈 방 grace 후)되면 `blockedIds` 도 사라져 새 방에서 다시 학습.
+  - **(C) per-room 학습 차단**: Player가 재생 중 임베드 오류(코드 101/150)를 보고하면 서버는 그 `videoId` 를 **`RoomState.blockedIds`**(해당 방)에 기록한다. 이후: ① 목록 UI에 **"재생 불가"** 로 표시(흑백 썸네일·취소선, 자동 건너뜀 안내), ② `advance()` 가 그 곡을 **스킵**, ③ 같은 영상의 추가를 추가 시점에 `embed disabled` 로 거부. 방 삭제(빈 방 7일 sweep 후)되면 `blockedIds` 도 사라져 새 방에서 다시 학습.
   - **resolveEmbeddable 반환 규약**: `false`=확정 불가(Data API `status.embeddable=false`, 즉 소유자가 임베드 OFF) → 거부, `true`=Data API가 가능이라 함, `null`=알 수 없음(oEmbed 200·키 없음·오류·테스트). `decideEmbed`: `false`면 거부, **이미 blockedIds에 있으면 `true`든 `null`이든 거부(sticky)**, 그 외 허용.
   - **중요(라이선스 음악 한계)**: `status.embeddable` 은 **소유자 토글**일 뿐, 저작권/라이선스가 걸린 음악 영상은 `embeddable=true` 인데도 임베드 재생 시 150으로 막힌다. 즉 **API 키가 있어도 이런 영상은 추가 시점에 못 막고**, 오직 재생 시 150(ground truth)으로만 잡힌다. 그래서 150으로 학습한 차단은 **API `true` 로도 자동 해제하지 않는다**(해제하면 재추가→재실패 반복).
-  - **임베드 다시 켜지면?**: 150-학습 차단은 **방이 재생성될 때(빈 방 grace 후 삭제) 초기화**되어 다시 시도된다(같은 방에서는 고정 유지). API 키는 **소유자가 임베드를 끈 영상**(embeddable=false)을 첫 추가에 막는 데만 확실히 유효하다.
+  - **임베드 다시 켜지면?**: 150-학습 차단은 **방이 재생성될 때(빈 방 7일 sweep 삭제 후) 초기화**되어 다시 시도된다(같은 방에서는 고정 유지). API 키는 **소유자가 임베드를 끈 영상**(embeddable=false)을 첫 추가에 막는 데만 확실히 유효하다.
+
+- **빈 방 정리(sweep)**: 방은 마지막 소켓이 나간 시각(`emptySince`, 서버 전용·영속·broadcast 안 함)을 기록하고, **부팅 1회 + 1시간 주기 sweep**이 `비어있음 && now-emptySince ≥ 7일(ROOM_TTL_MS)`인 방을 삭제(라이브 소켓 재확인 통과 시). 영속 타임스탬프 기반이라 **서버 재시작에도 유지**(과거 in-memory `setTimeout` 방식은 재시작 시 소실). stamp가 없으면(크래시·레거시) sweep이 재스탬프(self-heal). **`PINNED_ROOMS`**(env, 콤마 구분, 대소문자 무시) 방은 sweep에서 영구 면제(상시 DJ홈용).
   - `REMOTE_DJ_FAKE_TITLE` 설정 시 네트워크 없이 `null`(테스트는 blocklist 동작을 검증).
 - **빈 플레이어 auto-start**: `enqueueTrack` 시 `currentIndex < 0`(빈 재생목록)이면 추가한 곡(index 0)을 즉시 `currentIndex` 로 잡고 `isPlaying:true`. 이미 재생 중이면 playlist 끝에만 추가한다.
 - 신규 방은 `playlist: []`, `currentIndex: -1` 로 시작한다.

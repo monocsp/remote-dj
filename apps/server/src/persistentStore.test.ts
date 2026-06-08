@@ -46,6 +46,44 @@ describe('PersistentRoomStore', () => {
     expect(record?.state.currentIndex).toBe(0);
   });
 
+  it('persists emptySince across instances and clears it via markOccupied', async () => {
+    file = tmpFile();
+    const a = new PersistentRoomStore(file);
+    await a.getOrCreate('R1');
+    await a.markEmpty('R1', 12345);
+    // markEmpty only stamps when currently null — a second call must NOT overwrite.
+    await a.markEmpty('R1', 99999);
+    a.flush();
+
+    const b = new PersistentRoomStore(file);
+    expect((await b.get('R1'))?.emptySince).toBe(12345);
+    await b.markOccupied('R1');
+    b.flush();
+
+    const c = new PersistentRoomStore(file);
+    expect((await c.get('R1'))?.emptySince).toBeNull();
+  });
+
+  it('normalizes a legacy record with no emptySince to null (not instantly sweepable)', async () => {
+    file = tmpFile();
+    // A pre-sweep record on disk: a valid state but no emptySince key.
+    writeFileSync(
+      file,
+      JSON.stringify({
+        OLD: {
+          state: { roomCode: 'OLD', playlist: [], currentIndex: -1 },
+          log: [],
+          password: null,
+        },
+      }),
+      'utf8',
+    );
+    const store = new PersistentRoomStore(file);
+    const rec = await store.get('OLD');
+    expect(rec).toBeDefined();
+    expect(rec?.emptySince).toBeNull();
+  });
+
   it('starts empty on a missing file without throwing', async () => {
     file = tmpFile();
     const store = new PersistentRoomStore(file);
