@@ -3,6 +3,7 @@ import { type Ack, type ActivityEntry, C2S, LIMITS, type RoomState, S2C } from '
 import { type Socket as ClientSocket, io as ioClient } from 'socket.io-client';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createServer, decideEmbed } from './index.js';
+import { InMemoryRoomStore } from './store.js';
 
 const VALID_URL = 'https://www.youtube.com/watch?v=dQw4w9WgXcQ';
 const VALID_ID = 'dQw4w9WgXcQ';
@@ -1815,5 +1816,121 @@ describe('remote-dj server', () => {
     await controller.emitWithAck(C2S.SetVolume, { volume: 33 });
     const latest = await probe;
     expect(latest.isPlaying).toBe(false);
+  });
+});
+
+// ── Empty-room sweep (restart-safe TTL via persisted emptySince) ──────────────
+// Drives sweepEmptyRooms(now) with an injected time, like tickSchedules(now), so
+// nothing waits on the wall clock. Each test gets its own server+store; the boot
+// sweep runs over the (still empty) store before we create rooms (setImmediate),
+// so it never interferes with our injected-now assertions.
+describe('empty-room sweep', () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  const servers: ReturnType<typeof createServer>[] = [];
+  const clients: ClientSocket[] = [];
+
+  async function makeServer(pinned?: string) {
+    if (pinned) process.env.PINNED_ROOMS = pinned;
+    else process.env.PINNED_ROOMS = '';
+    const store = new InMemoryRoomStore();
+    const srv = createServer(
+      store,
+      async () => 'T',
+      async () => null,
+      async () => true,
+    );
+    process.env.PINNED_ROOMS = ''; // createServer already captured it
+    await new Promise<void>((resolve) => srv.httpServer.listen(0, '127.0.0.1', () => resolve()));
+    // Let the fire-and-forget boot sweep run over the empty store (no-op) so it
+    // can't self-heal/delete rooms we create next.
+    await new Promise((resolve) => setImmediate(resolve));
+    servers.push(srv);
+    const port = (srv.httpServer.address() as AddressInfo).port;
+    const connect = () => {
+      const s = ioClient(`http://127.0.0.1:${port}`, { forceNew: true });
+      clients.push(s);
+      return s;
+    };
+    return { store, srv, connect };
+  }
+
+  afterEach(async () => {
+    for (const c of clients) c.disconnect();
+    clients.length = 0;
+    for (const s of servers) {
+      s.io.close();
+      await new Promise<void>((resolve) => s.httpServer.close(() => resolve()));
+    }
+    servers.length = 0;
+    process.env.PINNED_ROOMS = '';
+  });
+
+  it('deletes a room empty past the TTL', async () => {
+    const { store, srv } = await makeServer();
+    const now = Date.now();
+    await store.getOrCreate('AGED');
+    await store.markEmpty('AGED', now - 8 * DAY);
+    await srv.sweepEmptyRooms(now);
+    expect(await store.get('AGED')).toBeUndefined();
+  });
+
+  it('keeps a room empty for less than the TTL', async () => {
+    const { store, srv } = await makeServer();
+    const now = Date.now();
+    await store.getOrCreate('FRESH');
+    await store.markEmpty('FRESH', now - 1 * DAY);
+    await srv.sweepEmptyRooms(now);
+    expect(await store.get('FRESH')).toBeDefined();
+  });
+
+  it('does NOT delete an aged-out room that still has a live socket', async () => {
+    const { store, srv, connect } = await makeServer();
+    const now = Date.now();
+    const c = connect();
+    const ack = (await c.emitWithAck(C2S.Join, { roomCode: 'LIVE', role: 'player' })) as Ack;
+    expect(ack.ok).toBe(true);
+    // Force the empty-clock into the deletable past, but the live socket guards it.
+    await store.markEmpty('LIVE', now - 8 * DAY);
+    await srv.sweepEmptyRooms(now);
+    expect(await store.get('LIVE')).toBeDefined();
+  });
+
+  it('self-heals a room with null emptySince instead of deleting it', async () => {
+    const { store, srv } = await makeServer();
+    const now = Date.now();
+    await store.getOrCreate('HEAL'); // emptySince starts null
+    await srv.sweepEmptyRooms(now); // empty + null → re-stamp, NOT delete
+    const rec = await store.get('HEAL');
+    expect(rec).toBeDefined();
+    expect(rec?.emptySince).toBe(now);
+    // A later sweep past the TTL from the self-healed stamp deletes it.
+    await srv.sweepEmptyRooms(now + 8 * DAY);
+    expect(await store.get('HEAL')).toBeUndefined();
+  });
+
+  it('never sweeps a PINNED room even past the TTL', async () => {
+    const { store, srv } = await makeServer('DOLOMO');
+    const now = Date.now();
+    await store.getOrCreate('DOLOMO');
+    await store.markEmpty('DOLOMO', now - 30 * DAY);
+    await srv.sweepEmptyRooms(now);
+    expect(await store.get('DOLOMO')).toBeDefined();
+  });
+
+  it('join clears emptySince and the last disconnect stamps it (room stays alive)', async () => {
+    const { store, connect } = await makeServer();
+    const c = connect();
+    await c.emitWithAck(C2S.Join, { roomCode: 'LIFE', role: 'controller' });
+    expect((await store.get('LIFE'))?.emptySince).toBeNull();
+
+    c.disconnect();
+    // Wait for the server's disconnect handler to stamp emptySince.
+    let stamped: number | null = null;
+    for (let i = 0; i < 50 && stamped === null; i++) {
+      await new Promise((r) => setTimeout(r, 20));
+      stamped = (await store.get('LIFE'))?.emptySince ?? null;
+    }
+    expect(typeof stamped).toBe('number'); // room NOT deleted, just marked empty
+    expect(await store.get('LIFE')).toBeDefined();
   });
 });

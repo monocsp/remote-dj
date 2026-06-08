@@ -118,8 +118,16 @@ interface SocketData {
 
 type AckFn = (res: Ack) => void;
 
-/** Grace period before an empty room is deleted, allowing quick reconnects. */
-const ROOM_TTL_MS = 5 * 60_000;
+/**
+ * How long a room may stay EMPTY before the sweep deletes it (with its playlist).
+ * Used ONLY as a `now - emptySince >= ROOM_TTL_MS` comparison in the sweep — never
+ * as a setTimeout delay — so it survives restarts. 7 days keeps weekday rooms
+ * (e.g. DOLOMO) alive across weekends/holidays. PINNED_ROOMS are exempt entirely.
+ */
+const ROOM_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** How often the empty-room sweep runs (plus one sweep on boot). */
+const SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 
 /** Timeout for the YouTube oEmbed title lookup. */
 const TITLE_FETCH_TIMEOUT_MS = 3_000;
@@ -369,10 +377,11 @@ export function createServer(
 ): {
   httpServer: HttpServer;
   io: Server;
-  // Exposed so tests can drive the scheduler with an injected `now` instead of
-  // waiting on the wall clock. Backward-compatible: existing callers that only
-  // destructure { httpServer, io } are unaffected.
+  // Exposed so tests can drive the scheduler + empty-room sweep with an injected
+  // `now` instead of waiting on the wall clock. Backward-compatible: existing
+  // callers that only destructure { httpServer, io } are unaffected.
   tickSchedules: (now: Date) => Promise<void>;
+  sweepEmptyRooms: (now?: number) => Promise<void>;
 } {
   const httpServer = createHttpServer((req, res) => {
     if (req.url === '/health') {
@@ -544,23 +553,21 @@ export function createServer(
     cors: { origin: process.env.CORS_ORIGIN ?? '*' },
   });
 
-  // Pending deletions for rooms that went empty; cancelled if someone rejoins.
-  const pendingDeletions = new Map<string, NodeJS.Timeout>();
+  // Rooms exempt from the empty-room sweep (e.g. a permanent "DJ home" like
+  // DOLOMO). Server-only, set once at boot via the PINNED_ROOMS env (comma-sep,
+  // case-insensitive). No wire change — siblings the password concept.
+  const pinnedRooms = new Set(
+    (process.env.PINNED_ROOMS ?? '')
+      .split(',')
+      .map((s) => s.trim().toUpperCase())
+      .filter(Boolean),
+  );
 
   // videoIds known to be NON-EMBEDDABLE (YouTube error 101/150) live in
   // RoomState.blockedIds (per room) so clients can MARK them in the list and the
   // server can skip them. There's no reliable keyless way to detect embed-disabled
   // at add time, so we learn from the Player's playback errors; decideEmbed()
   // (module scope) folds the blocklist + embeddable result into an add decision.
-
-  /** Cancel any scheduled deletion for a room (e.g. on rejoin). */
-  function cancelDeletion(roomCode: string): void {
-    const timer = pendingDeletions.get(roomCode);
-    if (timer) {
-      clearTimeout(timer);
-      pendingDeletions.delete(roomCode);
-    }
-  }
 
   /** Recompute presence from connected sockets and broadcast `state`. */
   async function broadcastState(roomCode: string): Promise<void> {
@@ -796,6 +803,45 @@ export function createServer(
   const schedTimer = setInterval(() => void tickSchedules(new Date()), 60_000);
   schedTimer.unref();
 
+  // ── Empty-room sweep ─────────────────────────────────────────────────────
+  // The SINGLE deletion path. Routing both the sweep and any future caller
+  // through here guarantees the schedule edge (lastWant) is always torn down
+  // alongside the store record.
+  async function deleteRoomFully(roomCode: string): Promise<void> {
+    lastWant.delete(roomCode); // forget schedule edge so a recreated room starts fresh
+    await store.deleteRoom(roomCode); // blockedIds live in state → dropped with the room
+  }
+
+  /**
+   * Delete rooms that have been EMPTY for ≥ ROOM_TTL_MS. Restart-safe: the empty
+   * timestamp lives on the persisted record, not an in-memory timer. Runs once on
+   * boot (cleans rooms that aged out while the process was down) and hourly.
+   * Returns from createServer so tests can inject a deterministic `now`.
+   *  - live re-check via fetchSockets is the race guard (LAST await before delete);
+   *  - the emptySince===null branch SELF-HEALS rooms whose stamp was lost (crash,
+   *    legacy load) by re-stamping instead of deleting.
+   */
+  async function sweepEmptyRooms(now = Date.now()): Promise<void> {
+    for (const code of await store.listRoomCodes()) {
+      // Canonical (uppercase) compare so the exemption never depends on the
+      // client having uppercased the room code before joining.
+      if (pinnedRooms.has(code.toUpperCase())) continue;
+      const rec = await store.get(code);
+      if (!rec) continue;
+      const live = (await io.in(code).fetchSockets()).length;
+      if (live > 0) continue; // occupied — never sweep
+      if (rec.emptySince === null) {
+        await store.markEmpty(code, now); // self-heal: start the clock now
+        continue;
+      }
+      if (now - rec.emptySince >= ROOM_TTL_MS) await deleteRoomFully(code);
+    }
+  }
+
+  const sweepTimer = setInterval(() => void sweepEmptyRooms(), SWEEP_INTERVAL_MS);
+  sweepTimer.unref();
+  void sweepEmptyRooms(); // boot sweep: clean rooms that aged out while down
+
   io.on('connection', (socket) => {
     const data = socket.data as SocketData;
 
@@ -957,7 +1003,6 @@ export function createServer(
         await socket.leave(previousRoom);
       }
 
-      cancelDeletion(roomCode);
       await socket.join(roomCode);
       data.roomCode = roomCode;
       data.role = role;
@@ -972,6 +1017,10 @@ export function createServer(
       const record = existing
         ? await store.getOrCreate(roomCode)
         : await store.getOrCreate(roomCode, password?.trim() || null);
+
+      // Room is occupied again → clear the empty-clock so the sweep won't delete
+      // it. Placed AFTER getOrCreate so the record exists (ordering is load-bearing).
+      await store.markOccupied(roomCode);
 
       // Send current state (with recomputed presence) + full log to this socket.
       const sockets = await io.in(roomCode).fetchSockets();
@@ -1513,20 +1562,21 @@ export function createServer(
       });
       await broadcastState(room);
 
-      // If the room is now empty, schedule its deletion after a grace period.
+      // If the room is now empty, stamp the empty-clock (persisted). The sweep
+      // deletes it only after ROOM_TTL_MS — no in-memory timer to lose on restart.
+      // Socket.IO has already removed this socket at 'disconnect', so 0 is correct.
       const remaining = (await io.in(room).fetchSockets()).length;
-      if (remaining === 0 && !pendingDeletions.has(room)) {
-        const timer = setTimeout(() => {
-          pendingDeletions.delete(room);
-          lastWant.delete(room); // forget schedule edge so a recreated room starts fresh
-          void store.deleteRoom(room); // blockedIds live in state → dropped with the room
-        }, ROOM_TTL_MS);
-        pendingDeletions.set(room, timer);
+      if (remaining === 0) {
+        await store.markEmpty(room, Date.now());
+        // A Join can interleave with the await above (its markOccupied may run
+        // before this markEmpty). Re-confirm: if someone is now present, undo the
+        // stamp so an occupied room isn't recorded as empty-since-now.
+        if ((await io.in(room).fetchSockets()).length > 0) await store.markOccupied(room);
       }
     });
   });
 
-  return { httpServer, io, tickSchedules };
+  return { httpServer, io, tickSchedules, sweepEmptyRooms };
 }
 
 // Auto-start unless imported (e.g. by tests).
