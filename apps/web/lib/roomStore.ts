@@ -175,6 +175,10 @@ export const actions = {
 export const useConnected = () => useStore(store, (s) => s.connected);
 export const useSynced = () => useStore(store, (s) => s.synced);
 export const useRoomState = () => useStore(store, (s) => s.state);
+// Monotonic per-patch counter — changes on EVERY server broadcast, even when no
+// visible field did (e.g. a repeat-'all' wrap on a 1-track playlist). Lets the
+// Player react to broadcasts that selector hooks would otherwise dedupe away.
+export const useStateVersion = () => useStore(store, (s) => s.state?.stateVersion ?? 0);
 // The ordered playlist + cursor. Current track is derived (playlist[currentIndex]).
 export const usePlaylist = () => useStore(store, (s) => s.state?.playlist ?? EMPTY_PLAYLIST);
 export const useCurrentIndex = () => useStore(store, (s) => s.state?.currentIndex ?? -1);

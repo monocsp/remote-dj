@@ -194,6 +194,8 @@ interface ActivityEntry {
 
 **반복 'one'(현재곡 반복)**: **자동 종료(`trackEnded`)** 에서만 — `currentIndex >= 0` 이면 `lastSeek = { seconds: 0, ts }` + `isPlaying:true` 로 현재곡 재시작하고 **activity 를 남기지 않는다**. **수동 next 는 'one' 을 무시**(항상 다음 곡으로). 끝이고 `repeat !== 'all'` 이면 `{ok:true}` no-op.
 
+**같은 영상 ID로의 advance(웹 Player 의무)**: advance 결과 곡의 videoId 가 직전 곡과 같을 수 있다 — 인접한 중복 항목으로 진행하거나, **1곡 재생목록 + repeat 'all' 래핑**(커서·ID 모두 그대로, `stateVersion` 만 증가). 웹 Player 가 영상 ID 변화만으로 로드를 트리거하면 이 경우 iframe 이 ENDED 에 머물러 무음 정지한다. 따라서 웹 Player 는 **state 브로드캐스트마다 "`isPlaying` 인데 iframe 이 ENDED 면 0초로 되감고 재생"** 하는 복구를 수행해야 한다(`stateVersion` 이 매 patch 마다 증가하므로 신호로 사용).
+
 **removeQueued 커서 보정**: `index < currentIndex` → `currentIndex--`; `index === currentIndex`(현재곡 삭제) → 다음 곡이 그 자리에 슬라이드인(끝이었으면 한 칸 당김, 비면 `-1`+`isPlaying:false`, `playbackError` 클리어); `index > currentIndex` → 그대로.
 
 **playbackError 처리**: 현재 곡 오류는 activity `error` 기록 후, **앞에 곡이 있으면 advance**(반복 'all' 래핑은 **하지 않음** — 단일 곡 무한 오류 방지). 없으면 정지 + `playbackError = { code, ts, id }`.
