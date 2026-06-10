@@ -11,6 +11,7 @@ import { io as ioClient } from 'socket.io-client';
 //   PAIR-01/07 pairing happy-path (join → connected)
 //   PAIR-06 wrong-password rejection (room stays gated)
 //   QUEUE-01/07 enqueue propagates A → B; 다음 곡 promotes head to now-playing
+//   REPEAT-SAME-ID 1-track repeat-'all' wrap keeps playing (seek 0 + play)
 //
 // The YouTube IFrame API is mocked so no real network/login is needed: we
 // intercept the iframe_api script and inject a window.YT stub that records
@@ -42,6 +43,8 @@ async function mockYouTube(context: BrowserContext): Promise<void> {
     };
     // Stored playback position the Player reports as progress.
     w.__ytTime = 12;
+    // Mirrors the real getPlayerState(): -1 unstarted, then follows fired events.
+    w.__ytState = -1;
     class FakePlayer {
       _muted = false;
       constructor(
@@ -56,11 +59,16 @@ async function mockYouTube(context: BrowserContext): Promise<void> {
       ) {
         // Let tests drive a YouTube error event from the page context.
         w.__ytFireError = (code: number) => opts?.events?.onError?.({ data: code });
+        // Let tests drive a state change (e.g. 0 = ENDED when a video finishes).
+        w.__ytFireStateChange = (code: number) => {
+          w.__ytState = code;
+          opts?.events?.onStateChange?.({ data: code });
+        };
         // Signal ready, then fire PLAYING — lets the headless embed preflight
         // (lib/embedCheck) resolve 'ok' so enqueue proceeds in tests.
         setTimeout(() => {
           opts?.events?.onReady?.();
-          opts?.events?.onStateChange?.({ data: 1 }); // 1 = PlayerState.PLAYING
+          w.__ytFireStateChange(1); // 1 = PlayerState.PLAYING
         }, 0);
       }
       loadVideoById(id: string) {
@@ -81,9 +89,14 @@ async function mockYouTube(context: BrowserContext): Promise<void> {
       }
       playVideo() {
         w.__ytCalls.playVideo += 1;
+        // Like the real player, playing exits ENDED and notifies the page.
+        w.__ytFireStateChange(1);
       }
       pauseVideo() {
         w.__ytCalls.pauseVideo += 1;
+      }
+      getPlayerState() {
+        return w.__ytState;
       }
       getCurrentTime() {
         return w.__ytTime;
@@ -220,6 +233,59 @@ test('QUEUE-01/07 enqueue propagates + 다음 곡 promotes to now-playing', asyn
   await expect(currentRow(b, SECOND_ID)).toBeVisible({ timeout: 15_000 });
 
   await Promise.all([playerCtx.close(), ctxA.close(), ctxB.close()]);
+});
+
+// REPEAT-SAME-ID: a 1-track playlist under repeat 'all' wraps onto the SAME
+// video id — the Player must not stay silent in ENDED; it seeks back to 0 and
+// resumes (docs/qa/playback-modes.md §REPEAT-SAME-ID).
+test('REPEAT-SAME-ID 1-track repeat-all keeps playing after the video ends', async ({
+  browser,
+}) => {
+  const room = uniqueRoom();
+  const playerCtx = await browser.newContext();
+  const player = await openRoom(playerCtx, 'player', room);
+
+  // Single track auto-starts as the current track. (On the Player the enqueue
+  // form sits inside a collapsed "＋ 곡 추가" details — open it first.)
+  await player.getByText('＋ 곡 추가').click();
+  await enqueueTrack(player, VALID_URL);
+  await expect(currentRow(player, VALID_ID)).toBeVisible({ timeout: 15_000 });
+
+  // Repeat cycles off → all on the first tap (icon-only button, labeled by state).
+  await player.getByRole('button', { name: '반복: 꺼짐' }).click();
+  await expect(player.getByRole('button', { name: '반복: 전체' })).toBeVisible({
+    timeout: 15_000,
+  });
+
+  const playsBefore = await player.evaluate(
+    // biome-ignore lint/suspicious/noExplicitAny: test stub
+    () => (window as any).__ytCalls.playVideo as number,
+  );
+
+  // The video reaches its natural end → the iframe reports ENDED.
+  // biome-ignore lint/suspicious/noExplicitAny: test stub
+  await player.evaluate(() => (window as any).__ytFireStateChange(0)); // 0 = ENDED
+
+  // trackEnded → advance wraps onto the same id → the Player restarts from 0.
+  await expect
+    .poll(
+      async () =>
+        player.evaluate(
+          // biome-ignore lint/suspicious/noExplicitAny: test stub
+          () => ((window as any).__ytCalls.seekTo as { sec: number }[]).map((s) => s.sec),
+        ),
+      { timeout: 15_000 },
+    )
+    .toContain(0);
+  await expect
+    .poll(
+      // biome-ignore lint/suspicious/noExplicitAny: test stub
+      async () => player.evaluate(() => (window as any).__ytCalls.playVideo as number),
+      { timeout: 15_000 },
+    )
+    .toBeGreaterThan(playsBefore);
+
+  await playerCtx.close();
 });
 
 // PAIR-01/07: pairing happy-path — a controller joining an open room connects

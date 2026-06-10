@@ -5,6 +5,13 @@ import { defineConfig, devices } from '@playwright/test';
 // (:3001 /health) AND the web app (:3000). Waiting only on :3000 caused the
 // browser to connect before :3001 was up → "연결됨" never appeared (flake).
 
+// Ports are overridable so e2e can run BESIDE a live prd instance (web 3000 /
+// server 3001 — reuseExistingServer would otherwise grab prd and pollute it):
+// `E2E_WEB_PORT=3100 npm run e2e` runs web 3100 / server 3101. The web app
+// auto-targets web-port+1 at runtime (lib/serverUrl.ts), so no other wiring.
+const WEB_PORT = Number(process.env.E2E_WEB_PORT ?? 3000);
+const SERVER_PORT = WEB_PORT + 1;
+
 export default defineConfig({
   testDir: './e2e',
   fullyParallel: false,
@@ -13,7 +20,7 @@ export default defineConfig({
   workers: 1,
   reporter: [['list']],
   use: {
-    baseURL: 'http://localhost:3000',
+    baseURL: `http://localhost:${WEB_PORT}`,
     trace: 'on-first-retry',
   },
   projects: [
@@ -25,16 +32,16 @@ export default defineConfig({
   ],
   webServer: [
     {
-      command: 'npm run dev:server',
+      command: `PORT=${SERVER_PORT} npm run dev:server`,
       cwd: '../../',
-      url: 'http://localhost:3001/health',
+      url: `http://localhost:${SERVER_PORT}/health`,
       reuseExistingServer: !process.env.CI,
       timeout: 120_000,
     },
     {
-      command: 'npm run dev:web',
+      command: `PORT=${WEB_PORT} npm run dev:web`,
       cwd: '../../',
-      url: 'http://localhost:3000',
+      url: `http://localhost:${WEB_PORT}`,
       reuseExistingServer: !process.env.CI,
       timeout: 120_000,
     },
