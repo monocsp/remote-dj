@@ -11,6 +11,7 @@ import {
   useLastError,
   useLastSeek,
   useProgress,
+  useStateVersion,
   useTrackGain,
   useVolume,
 } from '@/lib/roomStore';
@@ -35,6 +36,7 @@ interface YTPlayer {
   isMuted(): boolean;
   getCurrentTime(): number;
   getDuration(): number;
+  getPlayerState(): number;
   seekTo(seconds: number, allowSeekAhead: boolean): void;
 }
 interface YTStateChangeEvent {
@@ -85,6 +87,7 @@ function PlayerInner() {
   const trackGain = useTrackGain();
   const lastSeek = useLastSeek();
   const progress = useProgress();
+  const stateVersion = useStateVersion();
 
   // Latest local YouTube playback error code (null = no current error).
   const [errorCode, setErrorCode] = useState<number | null>(null);
@@ -209,6 +212,25 @@ function PlayerInner() {
     if (isPlaying) playerRef.current.playVideo();
     else playerRef.current.pauseVideo();
   }, [isPlaying, ready]);
+
+  // SAME-ID ADVANCE RECOVERY: advance can land on a track whose video id equals
+  // the one that just ENDED (adjacent duplicate entries, or a 1-track playlist
+  // wrapping under repeat 'all'). Then `trackId` (and possibly `isPlaying`)
+  // doesn't change, the load/play effects above never re-fire, and the iframe
+  // would sit silent in ENDED while the server says playing. Every server patch
+  // bumps stateVersion, so on each broadcast restart an ended player whenever
+  // the room says it should be playing. (A genuinely-new id is loaded by the
+  // trackId effect above; if this one also fires before that load exits ENDED,
+  // the extra seek-to-0 + play lands on a video starting at 0 anyway.)
+  useEffect(() => {
+    const p = playerRef.current;
+    if (!p || !ready || !isPlaying || !trackId) return;
+    // Guard defensively like isMuted — never let a missing method break playback.
+    if (typeof p.getPlayerState !== 'function') return;
+    if (p.getPlayerState() !== window.YT?.PlayerState.ENDED) return;
+    p.seekTo(0, true);
+    p.playVideo();
+  }, [stateVersion, isPlaying, ready, trackId]);
 
   // Effective applied volume (master × per-track gain), mirrored to a ref so
   // onReady can apply it once the player exists (the effect below runs before

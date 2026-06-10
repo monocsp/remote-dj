@@ -50,6 +50,14 @@ SPEC: §반복/셔플 — queue empty + 'all' → 전체 재생목록(history+�
 - **When** Player가 `trackEnded` 1회 → 현재 B, 큐 0; 다시 `trackEnded`
 - **Then** 두 번째 trackEnded 후 `currentTrack.id` 가 A 로 되돌아오고 `isPlaying === true`
 
+## REPEAT-SAME-ID — 같은 영상 ID로의 자동 진행에서도 재생이 계속된다 (web)
+SPEC: §반복/셔플 — 같은 영상 ID로의 advance(인접 중복 항목 / 1곡 + repeat 'all' 래핑)에서
+웹 Player는 ENDED에 머물지 않고 0초부터 재생을 계속해야 한다(브로드캐스트마다 복구).
+
+- **Given** Player가 방에 입장, 곡 A 1곡만 재생 중, repeat 'all'
+- **When** 영상이 끝나 Player가 `trackEnded` 보고 (advance가 같은 곡/같은 ID로 래핑)
+- **Then** Player의 YouTube iframe이 `seekTo(0)` 후 재생 재개(무음 정지 없음), `isPlaying === true`
+
 ## OFF-STOP — 빈 큐 + 반복 'off'는 재생 정지
 SPEC: §반복/셔플 — queue empty + 'off' → `isPlaying:false`, currentTrack 유지.
 
