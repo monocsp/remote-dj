@@ -46,7 +46,7 @@ import {
 } from '@remote-dj/shared';
 import { nanoid } from 'nanoid';
 import { Server } from 'socket.io';
-import { KR_HOLIDAYS, kstParts, makeIsHoliday, maxHolidayYear } from './holidays.js';
+import { KR_HOLIDAYS, isYmd, kstParts, makeIsHoliday, maxHolidayYear } from './holidays.js';
 import { type Logger, createLogger, createNoopLogger } from './logger.js';
 import { PersistentRoomStore } from './persistentStore.js';
 import { InMemoryRoomStore, type RoomStore } from './store.js';
@@ -576,15 +576,33 @@ export function createServer(
   // "YYYY-MM-DD", GLOBAL across all rooms):
   //   EXTRA_HOLIDAYS        — force-ADD dates (e.g. a freshly-gazetted 임시공휴일)
   //   HOLIDAY_OVERRIDES_OFF — force-CANCEL dates (play through them)
-  const parseDateSet = (v: string | undefined) =>
-    new Set(
-      (v ?? '')
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean),
-    );
-  const extraHolidays = parseDateSet(process.env.EXTRA_HOLIDAYS);
-  const holidaysOff = parseDateSet(process.env.HOLIDAY_OVERRIDES_OFF);
+  // Parse a date lever: keep only real "YYYY-MM-DD" values; surface any
+  // malformed entry (e.g. a non-zero-padded "2026-7-17" that would silently
+  // never match) via a warn log instead of dropping it quietly.
+  const parseDateSet = (name: string, v: string | undefined) => {
+    const raw = (v ?? '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const valid = raw.filter(isYmd);
+    const invalid = raw.filter((s) => !isYmd(s));
+    if (invalid.length > 0) {
+      logger.write({
+        stream: 'ops',
+        level: 'warn',
+        occurredAt: new Date().toISOString(),
+        source: 'server',
+        runtime: 'node',
+        category: 'settings',
+        event: 'holiday.config_invalid',
+        message: `${name} ignored ${invalid.length} malformed date(s) (need YYYY-MM-DD)`,
+        data: { name, invalid },
+      });
+    }
+    return new Set(valid);
+  };
+  const extraHolidays = parseDateSet('EXTRA_HOLIDAYS', process.env.EXTRA_HOLIDAYS);
+  const holidaysOff = parseDateSet('HOLIDAY_OVERRIDES_OFF', process.env.HOLIDAY_OVERRIDES_OFF);
   const isHoliday = makeIsHoliday(extraHolidays, holidaysOff);
   // Fail-open visibility: a single boot line so an operator can spot a stale
   // static set (e.g. the annual update was forgotten) — noop logger in tests.
@@ -836,10 +854,14 @@ export function createServer(
         await store.patchState(code, { isPlaying: false });
         // skipReason distinguishes a holiday suppression from a normal
         // window-close (separate key from ActivityEntry's top-level reason).
+        // Only label 'holiday' when the holiday gate is what actually closed it
+        // (skipHolidays on AND a holiday) — not merely because today happens to
+        // be a holiday while a normal window closes.
+        const byHoliday = rec.state.schedule?.skipHolidays === true && isHoliday(now);
         await roomLog(code, 'schedule', null, {
           auto: true,
           action: 'stop',
-          skipReason: isHoliday(now) ? 'holiday' : undefined,
+          skipReason: byHoliday ? 'holiday' : undefined,
         });
         await broadcastState(code);
       }
