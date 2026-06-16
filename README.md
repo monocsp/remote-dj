@@ -24,6 +24,43 @@ npm run dev          # 서버(:3001) + 웹(:3000) 동시 기동
 | [docs/DEPLOYMENT.md](./docs/DEPLOYMENT.md) | 컴퓨터/Termux/터널 실행 + 포크 체크리스트 |
 | [docs/qa/](./docs/qa/) | 수용기준(Given/When/Then) — 격리 블랙박스 테스트의 기준 |
 
+## 자동 재생 예약 / 한국 공휴일 스킵
+
+Player의 **예약(스케줄)** 으로 요일·시간대를 정하면 서버가 그 시간에 맞춰 **자동으로
+재생을 켜고 끕니다**. 평가는 모두 **한국 시간(Asia/Seoul, KST)** 기준입니다.
+
+예약 편집에서 **"한국 공휴일에는 자동 재생 쉬기"** 를 켜면, 한국 공휴일(대체공휴일
+포함)에는 자동 재생을 건너뜁니다. 방별 설정이며 **기본 OFF**(기존 방은 영향 없음 —
+켜려면 Player가 예약을 다시 저장).
+
+**공휴일 데이터 소스 (서버단, 2단계)**
+
+1. **번들 정적 목록** (기본 · 오프라인) — `apps/server/src/holidays.ts` 에 2026·2027
+   공휴일을 검증해 내장. 키·네트워크 없이 동작. 음력 명절·대체공휴일·제헌절(2026
+   재지정) 포함. *연 1회* 다음 해 날짜를 추가해야 하며, 미달 시 유닛 테스트가 실패합니다.
+2. **KASI 공식 API** (선택) — `DATA_GO_KR_SERVICE_KEY` 를 주면 부팅 시 data.go.kr
+   "특일정보"(getRestDeInfo)에서 올해+내년 공휴일을 받아 **`apps/server/.data/holidays.json`
+   에 저장**하고 정적 목록과 합쳐 씁니다(대체·임시공휴일 자동 포착). **API 호출은 연 1회
+   수준**으로 최소화됩니다(캐시가 해당 연도를 못 덮거나 ~300일 지나야 재요청). 키가
+   없거나 호출이 실패하면 **정적 목록만으로 정상 동작**합니다.
+
+**설정** — `apps/server/.env` (gitignore 대상, `apps/server/.env.example` 참고):
+
+```bash
+# apps/server/.env  — KEY=VALUE 형식, 한 줄에 하나, 따옴표 불필요 (gitignore 대상)
+
+# data.go.kr → "특일정보" 검색 → 활용신청(자동승인) → 마이페이지의 "일반 인증키"
+# Encoding/Decoding 어느 형태든 그대로 붙여넣으면 된다(서버가 자동 판별)
+DATA_GO_KR_SERVICE_KEY=여기에_일반_인증키_붙여넣기
+
+# (선택) 임시공휴일 즉시 추가 / 특정일은 평소처럼 재생 — 쉼표구분 YYYY-MM-DD, 서버 전역
+EXTRA_HOLIDAYS=2026-10-02,2027-03-02
+HOLIDAY_OVERRIDES_OFF=2026-06-03
+```
+
+키를 채운 뒤 서버를 재시작하면 적용됩니다. 데이터 캐시 `apps/server/.data/holidays.json`
+는 `.data/` 가 gitignore 대상이라 커밋되지 않으며 릴리즈(재빌드)에도 보존됩니다.
+
 ## 개발 / 품질 게이트
 
 ```bash
@@ -82,7 +119,7 @@ npm run e2e -w apps/web   # Playwright 멀티컨텍스트 E2E (웹 블랙박스)
 
 ### 구현된 기능
 
-곡 변경(사유 필수) · 음량 · 재생/일시정지 · **재생 큐**(자동/수동 다음 곡) · **Seek**(진행바) · **설정**(allowAnonymous) · **YouTube 재생 오류/복원 UX** · 전체 Activity Log
+곡 변경(사유 필수) · 음량 · 재생/일시정지 · **재생 큐**(자동/수동 다음 곡) · **Seek**(진행바) · **설정**(allowAnonymous) · **주간 자동 재생 예약 + 한국 공휴일 스킵**(KST) · **YouTube 재생 오류/복원 UX** · 전체 Activity Log
 
 ### 추후 (비범위)
 
