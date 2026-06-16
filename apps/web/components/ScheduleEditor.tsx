@@ -14,18 +14,24 @@ const DAY_ROWS: { key: DayKey; label: string }[] = [
   { key: 'sun', label: '일' },
 ];
 
-/** Default schedule: weekdays on 09:00–18:00, weekend off (office use-case). */
+/**
+ * Default schedule: weekdays on 08:00–19:00, weekend off, Korean public
+ * holidays skipped (office use-case). NOTE: this only seeds a BRAND-NEW
+ * schedule — a room that already saved a schedule re-hydrates from its stored
+ * value (skipHolidays undefined ⇒ unchecked) and must be re-saved to enable it.
+ */
 function defaultSchedule(): WeeklySchedule {
   return {
     enabled: false,
+    skipHolidays: true,
     days: {
-      mon: { on: true, start: '09:00', end: '18:00' },
-      tue: { on: true, start: '09:00', end: '18:00' },
-      wed: { on: true, start: '09:00', end: '18:00' },
-      thu: { on: true, start: '09:00', end: '18:00' },
-      fri: { on: true, start: '09:00', end: '18:00' },
-      sat: { on: false, start: '09:00', end: '18:00' },
-      sun: { on: false, start: '09:00', end: '18:00' },
+      mon: { on: true, start: '08:00', end: '19:00' },
+      tue: { on: true, start: '08:00', end: '19:00' },
+      wed: { on: true, start: '08:00', end: '19:00' },
+      thu: { on: true, start: '08:00', end: '19:00' },
+      fri: { on: true, start: '08:00', end: '19:00' },
+      sat: { on: false, start: '08:00', end: '19:00' },
+      sun: { on: false, start: '08:00', end: '19:00' },
     },
   };
 }
@@ -72,7 +78,7 @@ export function ScheduleEditor({ schedule, onSave }: ScheduleEditorProps) {
         <b className="text-neutral-200">자동으로 켜고 끕니다.</b>
       </p>
       <p className="mt-0.5 text-xs text-neutral-500">
-        예: 평일 09:00 켜짐 · 18:00 꺼짐 / 주말은 체크 해제 → 종일 꺼짐
+        예: 평일 08:00 켜짐 · 19:00 꺼짐 / 주말은 체크 해제 → 종일 꺼짐
       </p>
       <label className="mt-3 flex min-h-[44px] items-center gap-3 py-2 text-sm text-neutral-200">
         <input
@@ -83,6 +89,19 @@ export function ScheduleEditor({ schedule, onSave }: ScheduleEditorProps) {
         />
         자동 켜기/끄기 사용
       </label>
+
+      <label className="flex min-h-[44px] items-center gap-3 py-2 text-sm text-neutral-200">
+        <input
+          type="checkbox"
+          checked={draft.skipHolidays ?? false}
+          onChange={(e) => setDraft((d) => ({ ...d, skipHolidays: e.target.checked }))}
+          className="h-6 w-6 accent-emerald-500"
+        />
+        한국 공휴일에는 자동 재생 쉬기
+      </label>
+      <p className="-mt-1 text-xs text-neutral-500">
+        대체공휴일 포함. 평일만 켜둔 방은 영향 없어요.
+      </p>
 
       {/* column header: clarify the two time fields mean turn-on / turn-off */}
       <div className="mt-1 flex items-center gap-2 text-[11px] text-neutral-500">
@@ -165,7 +184,7 @@ export function ScheduleEditor({ schedule, onSave }: ScheduleEditorProps) {
       </button>
       {error && <p className="mt-2 text-xs text-red-400">{error}</p>}
       <p className="mt-2 text-xs text-neutral-500">
-        이 기기(서버)의 시간 기준으로 자동 동작합니다.
+        한국 시간(Asia/Seoul) 기준으로 자동 동작합니다.
       </p>
 
       {/* Transient bottom snackbar — auto-dismisses (see the toast effect). */}

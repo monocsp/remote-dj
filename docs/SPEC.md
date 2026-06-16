@@ -114,7 +114,7 @@ interface RoomState {
   // 곡별 음량 정규화 게인: videoId → 감쇠 계수 [0.2, 1.0]. 없으면 1.0(변경 없음).
   // setVolume 이 100 을 넘지 못하므로 감쇠(≤1)만 가능. 방 전체 공유.
   trackGain: Record<string, number>;
-  // 주간 자동 재생/종료 예약(없으면 null). 서버 로컬 타임존 기준.
+  // 주간 자동 재생/종료 예약(없으면 null). 한국 시간(Asia/Seoul, KST) 기준.
   schedule: WeeklySchedule | null;
 }
 
@@ -129,6 +129,7 @@ interface DaySchedule {
 interface WeeklySchedule {
   enabled: boolean;
   days: Record<DayKey, DaySchedule>;
+  skipHolidays?: boolean; // 한국 공휴일 자동 스킵(없으면 OFF). 기존 예약 호환.
 }
 
 type ActivityType =
@@ -262,7 +263,9 @@ activity `gain`(detail `{videoId, gain}`)을 남긴 뒤 브로드캐스트한다
 
 방은 선택적으로 **주간 예약**(`RoomState.schedule: WeeklySchedule | null`, 신규 방 기본 `null`)을 가진다.
 요일별로 `on` 여부와 `start`/`end` 시각("HH:MM", 24h)을 지정하면, 서버가 그 시간대에 맞춰
-**자동으로 재생을 시작/종료**한다. 시각은 모두 **서버 로컬 타임존** 기준이다.
+**자동으로 재생을 시작/종료**한다. 요일·시각·공휴일 판정은 모두 **한국 시간(Asia/Seoul, KST)**
+기준이다(한국은 DST 없음, 고정 +09:00 — 서버는 하나의 KST 민용시 레코드에서 요일·HH:MM·날짜를
+모두 도출하므로 시간창과 공휴일 날짜가 어긋나지 않는다).
 
 예약은 **Player가 설정한다**(디바이스/운영 설정). Controller는 사운드/음악 제어 전용이며 예약 UI를 갖지 않는다.
 
@@ -271,8 +274,15 @@ activity `gain`(detail `{videoId, gain}`)을 남긴 뒤 브로드캐스트한다
 | `setSchedule` | **Player 전용** | **선택** | `schedule`(또는 `null`로 해제)을 검증·저장. activity `schedule`(detail `{enabled}`), 브로드캐스트 |
 
 - **검증**(`schedule != null` 일 때): `enabled` boolean, `days` 에 7개 요일 키(`mon`..`sun`) 모두 존재,
-  각 `day.on` boolean + `isHHMM(start)` + `isHHMM(end)` + `start < end`. 하나라도 위반하면
-  `{ ok:false, error:'invalid schedule' }`. `null` 은 예약 해제로 항상 허용.
+  각 `day.on` boolean + `isHHMM(start)` + `isHHMM(end)` + `start < end`, 그리고 `skipHolidays` 가
+  존재하면 boolean. 하나라도 위반하면 `{ ok:false, error:'invalid schedule' }`. `null` 은 예약 해제로 항상 허용.
+- **공휴일 스킵(`skipHolidays`)**: 방별 옵트인(없으면 OFF — 기존 저장 예약은 그대로). `true` 면 want
+  계산에서 **enabled 체크 직후·요일 조회 전** 에 한국 공휴일이면 `false` 를 반환해 그날 자동 재생을
+  켜지 않는다. 공휴일 집합은 서버가 부팅 시 메모리에 구성한다(핫패스에서 HTTP 호출 없음):
+  번들된 정적 KR 공휴일(대체공휴일·음력 명절 양력 변환 포함) ∪ `EXTRA_HOLIDAYS` env(쉼표구분
+  `YYYY-MM-DD` 강제 추가 — 임시공휴일) **\\** `HOLIDAY_OVERRIDES_OFF` env(강제 해제). env 레버는
+  **서버 전역**(특정 방만 다르게 불가). 정적 목록은 연 1회 갱신 대상이며, 임시공휴일은 MVP 에서
+  자동 포착되지 않는다(`EXTRA_HOLIDAYS` + 재시작으로 수동 처리).
 - **분 단위 체크**: 서버는 60초마다 현재 로컬 시각을 평가한다(`setInterval(..., 60_000)`).
   테스트/QA 는 `createServer` 가 반환하는 `tickSchedules(now)` 로 결정적인 `now` 를 주입한다.
   타이머는 `.unref()` 되어 프로세스/테스트 종료를 막지 않는다.
@@ -285,8 +295,8 @@ activity `gain`(detail `{videoId, gain}`)을 남긴 뒤 브로드캐스트한다
 - **시작(want `true` 이고 정지 상태)**: `currentIndex >= 0` 이면 `isPlaying:true` 로 재개,
   아니고 `playlist` 가 있으면 `currentIndex:0` 으로 첫 곡 재생, 둘 다 없으면 `isPlaying:true` 만
   세팅(무해). 그 뒤 activity `schedule`(detail `{auto:true, action:'play'}`) 기록 + 브로드캐스트.
-- **종료(want `false` 이고 재생 중)**: `isPlaying:false`, activity `schedule`(detail `{auto:true, action:'stop'}`),
-  브로드캐스트.
+- **종료(want `false` 이고 재생 중)**: `isPlaying:false`, activity `schedule`(detail `{auto:true, action:'stop'}`,
+  공휴일 스킵으로 인한 종료면 `skipReason:'holiday'` 추가), 브로드캐스트.
 - **영속**: 예약은 `RoomState.schedule` 의 일부이므로 `PersistentRoomStore` 에 의해 **자동 저장**된다.
 
 ## 검증 규칙

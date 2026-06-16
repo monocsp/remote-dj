@@ -46,6 +46,7 @@ import {
 } from '@remote-dj/shared';
 import { nanoid } from 'nanoid';
 import { Server } from 'socket.io';
+import { KR_HOLIDAYS, kstParts, makeIsHoliday, maxHolidayYear } from './holidays.js';
 import { type Logger, createLogger, createNoopLogger } from './logger.js';
 import { PersistentRoomStore } from './persistentStore.js';
 import { InMemoryRoomStore, type RoomStore } from './store.js';
@@ -321,38 +322,45 @@ function shuffledCopy<T>(a: T[]): T[] {
 }
 
 // ── Weekly schedule helpers (pure) ────────────────────────────────────────
-// Indexed by Date.getDay() (0 = Sunday) so DAY_KEYS[now.getDay()] maps a JS
-// date to the matching DaySchedule key.
+// The 7 day keys (used to validate a schedule carries every weekday). The
+// day-of-week / HH:MM derivation lives in holidays.ts (kstParts) so the window
+// and the holiday-date check share ONE Asia/Seoul civil-time record.
 const DAY_KEYS: DayKey[] = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
 
-/** Zero-padded local "HH:MM" for `d`. */
-function hhmm(d: Date): string {
-  const h = String(d.getHours()).padStart(2, '0');
-  const m = String(d.getMinutes()).padStart(2, '0');
-  return `${h}:${m}`;
-}
-
 /**
- * Does the schedule want playback ON at `now`?
+ * Does the schedule want playback ON at `now`? Day-of-week and "HH:MM" are
+ * evaluated in Asia/Seoul (KST) via kstParts.
  *  - null / disabled schedule → null (NO opinion; scheduler skips the room).
+ *  - skipHolidays && KST public holiday → false (suppress on holidays).
  *  - day off → false.
- *  - otherwise true iff the current local "HH:MM" is in [start, end).
+ *  - otherwise true iff the current KST "HH:MM" is in [start, end).
  */
-function scheduleWantsPlay(schedule: WeeklySchedule | null, now: Date): boolean | null {
+function scheduleWantsPlay(
+  schedule: WeeklySchedule | null,
+  now: Date,
+  isHoliday: (now: Date) => boolean,
+): boolean | null {
   if (!schedule || !schedule.enabled) return null;
-  const day = schedule.days[DAY_KEYS[now.getDay()]];
+  // Holiday suppression is opt-in per room; absent skipHolidays ⇒ OFF, so
+  // existing saved schedules behave exactly as before.
+  if (schedule.skipHolidays && isHoliday(now)) return false;
+  const { weekday, hhmm: cur } = kstParts(now);
+  const day = schedule.days[weekday];
   if (!day || !day.on) return false;
-  const cur = hhmm(now);
   return day.start <= cur && cur < day.end;
 }
 
 /**
  * Validate a WeeklySchedule (only when non-null). Requires: enabled boolean,
  * all 7 day keys present, each day.on boolean with valid HH:MM start/end and
- * start < end. Returns true when the schedule is structurally acceptable.
+ * start < end, and (when present) skipHolidays boolean. Returns true when the
+ * schedule is structurally acceptable.
  */
 function isValidSchedule(schedule: WeeklySchedule): boolean {
   if (typeof schedule.enabled !== 'boolean') return false;
+  if (schedule.skipHolidays !== undefined && typeof schedule.skipHolidays !== 'boolean') {
+    return false;
+  }
   if (!schedule.days || typeof schedule.days !== 'object') return false;
   for (const key of DAY_KEYS) {
     const day = schedule.days[key];
@@ -563,6 +571,40 @@ export function createServer(
       .filter(Boolean),
   );
 
+  // Korean public-holiday auto-skip (per-room opt-in via schedule.skipHolidays).
+  // Operator levers, parsed once at boot like PINNED_ROOMS (comma-sep
+  // "YYYY-MM-DD", GLOBAL across all rooms):
+  //   EXTRA_HOLIDAYS        — force-ADD dates (e.g. a freshly-gazetted 임시공휴일)
+  //   HOLIDAY_OVERRIDES_OFF — force-CANCEL dates (play through them)
+  const parseDateSet = (v: string | undefined) =>
+    new Set(
+      (v ?? '')
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean),
+    );
+  const extraHolidays = parseDateSet(process.env.EXTRA_HOLIDAYS);
+  const holidaysOff = parseDateSet(process.env.HOLIDAY_OVERRIDES_OFF);
+  const isHoliday = makeIsHoliday(extraHolidays, holidaysOff);
+  // Fail-open visibility: a single boot line so an operator can spot a stale
+  // static set (e.g. the annual update was forgotten) — noop logger in tests.
+  logger.write({
+    stream: 'ops',
+    level: 'info',
+    occurredAt: new Date().toISOString(),
+    source: 'server',
+    runtime: 'node',
+    category: 'settings',
+    event: 'holiday.config',
+    message: 'holiday auto-skip config loaded',
+    data: {
+      bundledCount: KR_HOLIDAYS.size,
+      maxCoveredYear: maxHolidayYear(),
+      extraHolidays: extraHolidays.size,
+      overridesOff: holidaysOff.size,
+    },
+  });
+
   // videoIds known to be NON-EMBEDDABLE (YouTube error 101/150) live in
   // RoomState.blockedIds (per room) so clients can MARK them in the list and the
   // server can skip them. There's no reliable keyless way to detect embed-disabled
@@ -761,7 +803,7 @@ export function createServer(
     for (const code of await store.listRoomCodes()) {
       const rec = await store.get(code);
       if (!rec) continue;
-      const want = scheduleWantsPlay(rec.state.schedule, now);
+      const want = scheduleWantsPlay(rec.state.schedule, now, isHoliday);
       if (want === null) {
         // No/disabled schedule → forget the last edge so re-enabling within the
         // same window still fires a fresh edge.
@@ -792,7 +834,13 @@ export function createServer(
         await broadcastState(code);
       } else if (want === false && rec.state.isPlaying) {
         await store.patchState(code, { isPlaying: false });
-        await roomLog(code, 'schedule', null, { auto: true, action: 'stop' });
+        // skipReason distinguishes a holiday suppression from a normal
+        // window-close (separate key from ActivityEntry's top-level reason).
+        await roomLog(code, 'schedule', null, {
+          auto: true,
+          action: 'stop',
+          skipReason: isHoliday(now) ? 'holiday' : undefined,
+        });
         await broadcastState(code);
       }
     }

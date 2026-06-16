@@ -1669,10 +1669,14 @@ describe('remote-dj server', () => {
   });
 
   // ── SCHED-xx: weekly play schedule (예약 재생/종료) ──────────────────────────
-  // 2026-06-01 is a Monday. Fixed instants keep the time-based logic
-  // deterministic (the scheduler is driven via the injected `tick(now)`).
-  const MON_10 = new Date(2026, 5, 1, 10, 0, 0); // Mon 10:00 (inside 09–18)
-  const MON_20 = new Date(2026, 5, 1, 20, 0, 0); // Mon 20:00 (outside 09–18)
+  // 2026-06-01 is a Monday in KST. The scheduler now evaluates in Asia/Seoul,
+  // so these instants are pinned in UTC (KST = UTC+9) to stay deterministic on
+  // ANY host timezone (CI may run in UTC).
+  const MON_10 = new Date(Date.UTC(2026, 5, 1, 1, 0, 0)); // Mon 10:00 KST (inside 09–18)
+  const MON_20 = new Date(Date.UTC(2026, 5, 1, 11, 0, 0)); // Mon 20:00 KST (outside 09–18)
+  // 2026-03-02 is a Monday AND a 대체공휴일 (3·1절 substitute). 10:00 KST is
+  // inside the 09–18 window, so only the holiday gate can keep it closed.
+  const HOLIDAY_MON_10 = new Date(Date.UTC(2026, 2, 2, 1, 0, 0)); // 2026-03-02 10:00 KST
 
   type DK = 'mon' | 'tue' | 'wed' | 'thu' | 'fri' | 'sat' | 'sun';
   // Mon ON 09:00–18:00, every other day OFF.
@@ -1808,7 +1812,7 @@ describe('remote-dj server', () => {
     await paused;
 
     // Still inside the window, but no edge (want stays true) → must NOT resume.
-    await tick(new Date(2026, 5, 1, 10, 1, 0));
+    await tick(new Date(Date.UTC(2026, 5, 1, 1, 1, 0))); // Mon 10:01 KST
 
     // Probe a fresh broadcast (setVolume always broadcasts) and confirm the
     // manual pause survived — the scheduler did not flip isPlaying back on.
@@ -1816,6 +1820,60 @@ describe('remote-dj server', () => {
     await controller.emitWithAck(C2S.SetVolume, { volume: 33 });
     const latest = await probe;
     expect(latest.isPlaying).toBe(false);
+  });
+
+  it('SCHED-07 skipHolidays suppresses auto-play on a KR holiday but not on a normal day', async () => {
+    const room = 'SCHED7';
+    const controller = connect();
+    const player = connect();
+    await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+    await player.emitWithAck(C2S.Join, { roomCode: room, role: 'player' });
+
+    // Monday window 09–18, holiday-skip ON.
+    await player.emitWithAck(C2S.SetSchedule, {
+      schedule: { ...monSchedule(), skipHolidays: true },
+    });
+    const hasTrack = waitFor<RoomState>(controller, S2C.State, (s) => currentId(s) === VALID_ID);
+    await controller.emitWithAck(C2S.ChangeTrack, { url: VALID_URL, reason: 'A' });
+    await hasTrack;
+    const prePaused = waitFor<RoomState>(controller, S2C.State, (s) => s.isPlaying === false);
+    await controller.emitWithAck(C2S.TogglePlay, { isPlaying: false });
+    await prePaused;
+
+    // Holiday Monday, inside the window: want=false (holiday) → must NOT start.
+    await tick(HOLIDAY_MON_10);
+    // Probe a fresh broadcast and confirm it stayed paused.
+    const probe = waitFor<RoomState>(controller, S2C.State, (s) => s.volume === 33);
+    await controller.emitWithAck(C2S.SetVolume, { volume: 33 });
+    expect((await probe).isPlaying).toBe(false);
+
+    // Normal Monday, inside the window: edge false→true → starts. Proves the
+    // gate is holiday-specific, not a blanket off.
+    const playing = waitFor<RoomState>(controller, S2C.State, (s) => s.isPlaying === true);
+    await tick(MON_10);
+    expect((await playing).isPlaying).toBe(true);
+  });
+
+  it('SCHED-08 a schedule without skipHolidays plays on a holiday (undefined = OFF)', async () => {
+    const room = 'SCHED8';
+    const controller = connect();
+    const player = connect();
+    await controller.emitWithAck(C2S.Join, { roomCode: room, role: 'controller' });
+    await player.emitWithAck(C2S.Join, { roomCode: room, role: 'player' });
+
+    // No skipHolidays field → backward-compatible OFF → holidays ignored.
+    await player.emitWithAck(C2S.SetSchedule, { schedule: monSchedule() });
+    const hasTrack = waitFor<RoomState>(controller, S2C.State, (s) => currentId(s) === VALID_ID);
+    await controller.emitWithAck(C2S.ChangeTrack, { url: VALID_URL, reason: 'A' });
+    await hasTrack;
+    const prePaused = waitFor<RoomState>(controller, S2C.State, (s) => s.isPlaying === false);
+    await controller.emitWithAck(C2S.TogglePlay, { isPlaying: false });
+    await prePaused;
+
+    // Holiday Monday inside the window: want=true (no skip) → edge → starts.
+    const playing = waitFor<RoomState>(controller, S2C.State, (s) => s.isPlaying === true);
+    await tick(HOLIDAY_MON_10);
+    expect((await playing).isPlaying).toBe(true);
   });
 });
 
