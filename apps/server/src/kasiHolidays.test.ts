@@ -1,3 +1,6 @@
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   encodeServiceKey,
@@ -6,6 +9,31 @@ import {
   parseKasiResponse,
 } from './kasiHolidays.js';
 import { createNoopLogger } from './logger.js';
+
+// A fetch that fails the test if it is ever called (asserts "no network").
+const failIfCalled = (async () => {
+  throw new Error('fetch should not have been called');
+}) as unknown as typeof fetch;
+// A fetch returning a valid month body: January has a holiday, others empty.
+const validFetch = (async (url: string) => {
+  const mm = new URL(url).searchParams.get('solMonth');
+  const item =
+    mm === '01'
+      ? { isHoliday: 'Y', locdate: 20260101 }
+      : { isHoliday: 'N', locdate: `2026${mm}15` };
+  return {
+    ok: true,
+    json: async () => ({ response: { header: { resultCode: '00' }, body: { items: { item } } } }),
+  } as Response;
+}) as unknown as typeof fetch;
+async function seedCache(dates: string[], fetchedAt: string): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), 'rdj-hol-'));
+  const file = join(dir, 'holidays.json');
+  await writeFile(file, JSON.stringify({ fetchedAt, years: [2026, 2027], dates }));
+  return file;
+}
+const NOW = new Date('2026-06-16T00:00:00Z');
+const OLD = '2020-01-01T00:00:00Z'; // > REFRESH_AFTER_DAYS old → stale
 
 describe('encodeServiceKey', () => {
   it('URL-encodes a raw (decoding) key', () => {
@@ -135,6 +163,15 @@ describe('fetchKasiYear', () => {
       }) as Response) as unknown as typeof fetch;
     await expect(fetchKasiYear(2026, 'BAD', fakeFetch)).rejects.toThrow(/resultCode 30/);
   });
+
+  it('throws when resultCode is missing (200 w/o header) — no silent empty success', async () => {
+    const fakeFetch = (async () =>
+      ({
+        ok: true,
+        json: async () => ({ response: { body: {} } }),
+      }) as Response) as unknown as typeof fetch;
+    await expect(fetchKasiYear(2026, 'KEY', fakeFetch)).rejects.toThrow(/missing/);
+  });
 });
 
 describe('ensureFreshHolidays', () => {
@@ -188,5 +225,102 @@ describe('ensureFreshHolidays', () => {
     });
     expect(applied).not.toBeNull();
     expect((applied as unknown as Set<string>).has('2026-01-01')).toBe(true);
+  });
+
+  it('uses a fresh cache with ZERO network calls', async () => {
+    const cacheFile = await seedCache(['2026-03-01'], NOW.toISOString());
+    let applied: ReadonlySet<string> | null = null;
+    await ensureFreshHolidays({
+      serviceKey: 'KEY',
+      cacheFile,
+      now: NOW,
+      apply: (s) => {
+        applied = s;
+      },
+      logger: createNoopLogger(),
+      fetchImpl: failIfCalled,
+    });
+    expect([...(applied as unknown as Set<string>)]).toEqual(['2026-03-01']);
+  });
+
+  it('with no key, applies an existing (even stale) cache without network', async () => {
+    const cacheFile = await seedCache(['2026-03-01'], OLD);
+    let applied: ReadonlySet<string> | null = null;
+    await ensureFreshHolidays({
+      serviceKey: undefined,
+      cacheFile,
+      now: NOW,
+      apply: (s) => {
+        applied = s;
+      },
+      logger: createNoopLogger(),
+      fetchImpl: failIfCalled,
+    });
+    expect([...(applied as unknown as Set<string>)]).toEqual(['2026-03-01']);
+  });
+
+  it('keeps the last-good cache when the fetch throws (fail-soft)', async () => {
+    const cacheFile = await seedCache(['2026-03-01'], OLD); // stale → triggers a fetch
+    const throwing = (async () => {
+      throw new Error('network down');
+    }) as unknown as typeof fetch;
+    let applied: ReadonlySet<string> | null = null;
+    await ensureFreshHolidays({
+      serviceKey: 'KEY',
+      cacheFile,
+      now: NOW,
+      apply: (s) => {
+        applied = s;
+      },
+      logger: createNoopLogger(),
+      fetchImpl: throwing,
+    });
+    expect([...(applied as unknown as Set<string>)]).toEqual(['2026-03-01']);
+    expect(JSON.parse(await readFile(cacheFile, 'utf8')).dates).toEqual(['2026-03-01']);
+  });
+
+  it('refuses to overwrite the cache with an empty fetch (poisoning guard)', async () => {
+    const cacheFile = await seedCache(['2026-03-01'], OLD); // stale → triggers a fetch
+    const emptyFetch = (async (url: string) => {
+      const mm = new URL(url).searchParams.get('solMonth');
+      return {
+        ok: true,
+        json: async () => ({
+          response: {
+            header: { resultCode: '00' },
+            body: { items: { item: { isHoliday: 'N', locdate: `2026${mm}15` } } },
+          },
+        }),
+      } as Response;
+    }) as unknown as typeof fetch;
+    let applied: ReadonlySet<string> | null = null;
+    await ensureFreshHolidays({
+      serviceKey: 'KEY',
+      cacheFile,
+      now: NOW,
+      apply: (s) => {
+        applied = s;
+      },
+      logger: createNoopLogger(),
+      fetchImpl: emptyFetch,
+    });
+    expect([...(applied as unknown as Set<string>)]).toEqual(['2026-03-01']); // kept last-good
+    expect(JSON.parse(await readFile(cacheFile, 'utf8')).dates).toEqual(['2026-03-01']); // NOT clobbered
+  });
+
+  it('atomically writes the cache, creating a missing directory', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'rdj-hol-'));
+    const cacheFile = join(dir, 'nested', 'holidays.json'); // 'nested' does not exist yet
+    await ensureFreshHolidays({
+      serviceKey: 'KEY',
+      cacheFile,
+      now: NOW,
+      apply: () => {},
+      logger: createNoopLogger(),
+      fetchImpl: validFetch,
+    });
+    const onDisk = JSON.parse(await readFile(cacheFile, 'utf8'));
+    expect(onDisk.dates).toContain('2026-01-01');
+    expect(onDisk.years).toEqual([2026, 2027]);
   });
 });

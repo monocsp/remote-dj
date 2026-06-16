@@ -13,7 +13,8 @@
 // 대체공휴일·임시공휴일 come back as resolved solar dates, so this auto-captures
 // exactly the cases the hand-maintained static list can miss.
 
-import { readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import path from 'node:path';
 import { isYmd, kstParts } from './holidays.js';
 import type { Logger } from './logger.js';
 
@@ -103,10 +104,13 @@ export async function fetchKasiYear(
     const res = await fetchOk(url, fetchImpl, `${year}-${mm}`);
     // biome-ignore lint/suspicious/noExplicitAny: external API shape is dynamic JSON.
     const json: any = await res.json();
+    // Require an explicit success code. A 200 body that lacks the header path
+    // (code === undefined) is a malformed/edge response, NOT a success — treat
+    // it as a failure so it can't poison the cache with zero holidays.
     const code = json?.response?.header?.resultCode;
-    if (code && code !== '00') {
+    if (code !== '00') {
       throw new Error(
-        `KASI resultCode ${code}: ${json?.response?.header?.resultMsg} (${year}-${mm})`,
+        `KASI resultCode ${code ?? 'missing'}: ${json?.response?.header?.resultMsg ?? 'no header'} (${year}-${mm})`,
       );
     }
     for (const d of parseKasiResponse(json)) out.add(d);
@@ -118,6 +122,17 @@ function ageDays(iso: string, now: Date): number {
   const t = Date.parse(iso);
   if (Number.isNaN(t)) return Number.POSITIVE_INFINITY;
   return (now.getTime() - t) / 86_400_000;
+}
+
+// Durable write mirroring PersistentRoomStore.save(): ensure the dir exists,
+// write to a same-directory temp file, then atomically rename. The temp file
+// stays on the same filesystem as the target so the rename can't EXDEV on
+// Android/Termux multi-mount setups.
+async function writeCacheAtomic(cacheFile: string, cache: HolidayCache): Promise<void> {
+  await mkdir(path.dirname(cacheFile), { recursive: true });
+  const tmp = `${cacheFile}.${process.pid}.tmp`;
+  await writeFile(tmp, JSON.stringify(cache, null, 2));
+  await rename(tmp, cacheFile);
 }
 
 async function readCache(file: string): Promise<HolidayCache | null> {
@@ -213,12 +228,20 @@ export async function ensureFreshHolidays(opts: {
     for (const y of needed) {
       for (const d of await fetchKasiYear(y, serviceKey, fetchImpl)) merged.add(d);
     }
+    // Korea has 10+ statutory holidays a year; an empty union means a
+    // parseable-but-degraded response. Refuse to persist it (which would clobber
+    // the last-good cache) — fall through to the catch's last-good/static path.
+    if (merged.size === 0) {
+      throw new Error(
+        `KASI returned 0 holidays for ${needed.join(',')} — refusing to overwrite cache`,
+      );
+    }
     const snapshot: HolidayCache = {
       fetchedAt: now.toISOString(),
       years: needed,
       dates: [...merged].sort(),
     };
-    await writeFile(cacheFile, JSON.stringify(snapshot, null, 2));
+    await writeCacheAtomic(cacheFile, snapshot);
     apply(merged);
     log('info', 'holiday.kasi_refresh', 'refreshed holidays from KASI', {
       count: merged.size,
