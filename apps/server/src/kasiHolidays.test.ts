@@ -101,6 +101,28 @@ describe('fetchKasiYear', () => {
     expect([...set]).toEqual(['2026-03-01']);
   });
 
+  it('retries past a transient 401 from the gateway and recovers', async () => {
+    let calls = 0;
+    const fakeFetch = (async (url: string) => {
+      calls++;
+      if (calls === 1) return { ok: false, status: 401 } as Response; // first call flakes
+      const mm = new URL(url).searchParams.get('solMonth');
+      const item =
+        mm === '01'
+          ? { isHoliday: 'Y', locdate: 20260101 }
+          : { isHoliday: 'N', locdate: `2026${mm}15` };
+      return {
+        ok: true,
+        json: async () => ({
+          response: { header: { resultCode: '00' }, body: { items: { item } } },
+        }),
+      } as Response;
+    }) as unknown as typeof fetch;
+    const set = await fetchKasiYear(2026, 'KEY', fakeFetch);
+    expect(calls).toBe(13); // 1 retry + 12 months
+    expect([...set]).toEqual(['2026-01-01']);
+  });
+
   it('throws on a non-00 resultCode (e.g. unregistered key)', async () => {
     const fakeFetch = (async () =>
       ({
