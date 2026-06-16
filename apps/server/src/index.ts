@@ -46,6 +46,8 @@ import {
 } from '@remote-dj/shared';
 import { nanoid } from 'nanoid';
 import { Server } from 'socket.io';
+import { KR_HOLIDAYS, isYmd, kstParts, makeIsHoliday, maxHolidayYear } from './holidays.js';
+import { ensureFreshHolidays } from './kasiHolidays.js';
 import { type Logger, createLogger, createNoopLogger } from './logger.js';
 import { PersistentRoomStore } from './persistentStore.js';
 import { InMemoryRoomStore, type RoomStore } from './store.js';
@@ -321,38 +323,45 @@ function shuffledCopy<T>(a: T[]): T[] {
 }
 
 // ── Weekly schedule helpers (pure) ────────────────────────────────────────
-// Indexed by Date.getDay() (0 = Sunday) so DAY_KEYS[now.getDay()] maps a JS
-// date to the matching DaySchedule key.
+// The 7 day keys (used to validate a schedule carries every weekday). The
+// day-of-week / HH:MM derivation lives in holidays.ts (kstParts) so the window
+// and the holiday-date check share ONE Asia/Seoul civil-time record.
 const DAY_KEYS: DayKey[] = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
 
-/** Zero-padded local "HH:MM" for `d`. */
-function hhmm(d: Date): string {
-  const h = String(d.getHours()).padStart(2, '0');
-  const m = String(d.getMinutes()).padStart(2, '0');
-  return `${h}:${m}`;
-}
-
 /**
- * Does the schedule want playback ON at `now`?
+ * Does the schedule want playback ON at `now`? Day-of-week and "HH:MM" are
+ * evaluated in Asia/Seoul (KST) via kstParts.
  *  - null / disabled schedule → null (NO opinion; scheduler skips the room).
+ *  - skipHolidays && KST public holiday → false (suppress on holidays).
  *  - day off → false.
- *  - otherwise true iff the current local "HH:MM" is in [start, end).
+ *  - otherwise true iff the current KST "HH:MM" is in [start, end).
  */
-function scheduleWantsPlay(schedule: WeeklySchedule | null, now: Date): boolean | null {
+function scheduleWantsPlay(
+  schedule: WeeklySchedule | null,
+  now: Date,
+  isHoliday: (now: Date) => boolean,
+): boolean | null {
   if (!schedule || !schedule.enabled) return null;
-  const day = schedule.days[DAY_KEYS[now.getDay()]];
+  // Holiday suppression is opt-in per room; absent skipHolidays ⇒ OFF, so
+  // existing saved schedules behave exactly as before.
+  if (schedule.skipHolidays && isHoliday(now)) return false;
+  const { weekday, hhmm: cur } = kstParts(now);
+  const day = schedule.days[weekday];
   if (!day || !day.on) return false;
-  const cur = hhmm(now);
   return day.start <= cur && cur < day.end;
 }
 
 /**
  * Validate a WeeklySchedule (only when non-null). Requires: enabled boolean,
  * all 7 day keys present, each day.on boolean with valid HH:MM start/end and
- * start < end. Returns true when the schedule is structurally acceptable.
+ * start < end, and (when present) skipHolidays boolean. Returns true when the
+ * schedule is structurally acceptable.
  */
 function isValidSchedule(schedule: WeeklySchedule): boolean {
   if (typeof schedule.enabled !== 'boolean') return false;
+  if (schedule.skipHolidays !== undefined && typeof schedule.skipHolidays !== 'boolean') {
+    return false;
+  }
   if (!schedule.days || typeof schedule.days !== 'object') return false;
   for (const key of DAY_KEYS) {
     const day = schedule.days[key];
@@ -382,6 +391,8 @@ export function createServer(
   // callers that only destructure { httpServer, io } are unaffected.
   tickSchedules: (now: Date) => Promise<void>;
   sweepEmptyRooms: (now?: number) => Promise<void>;
+  // Hot-swap the dynamic (KASI) holiday set; main() wires the Phase-2 refresher.
+  setDynamicHolidays: (dates: ReadonlySet<string>) => void;
 } {
   const httpServer = createHttpServer((req, res) => {
     if (req.url === '/health') {
@@ -562,6 +573,66 @@ export function createServer(
       .map((s) => s.trim().toUpperCase())
       .filter(Boolean),
   );
+
+  // Korean public-holiday auto-skip (per-room opt-in via schedule.skipHolidays).
+  // Operator levers, parsed once at boot like PINNED_ROOMS (comma-sep
+  // "YYYY-MM-DD", GLOBAL across all rooms):
+  //   EXTRA_HOLIDAYS        — force-ADD dates (e.g. a freshly-gazetted 임시공휴일)
+  //   HOLIDAY_OVERRIDES_OFF — force-CANCEL dates (play through them)
+  // Parse a date lever: keep only real "YYYY-MM-DD" values; surface any
+  // malformed entry (e.g. a non-zero-padded "2026-7-17" that would silently
+  // never match) via a warn log instead of dropping it quietly.
+  const parseDateSet = (name: string, v: string | undefined) => {
+    const raw = (v ?? '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const valid = raw.filter(isYmd);
+    const invalid = raw.filter((s) => !isYmd(s));
+    if (invalid.length > 0) {
+      logger.write({
+        stream: 'ops',
+        level: 'warn',
+        occurredAt: new Date().toISOString(),
+        source: 'server',
+        runtime: 'node',
+        category: 'settings',
+        event: 'holiday.config_invalid',
+        message: `${name} ignored ${invalid.length} malformed date(s) (need YYYY-MM-DD)`,
+        data: { name, invalid },
+      });
+    }
+    return new Set(valid);
+  };
+  const extraHolidays = parseDateSet('EXTRA_HOLIDAYS', process.env.EXTRA_HOLIDAYS);
+  const holidaysOff = parseDateSet('HOLIDAY_OVERRIDES_OFF', process.env.HOLIDAY_OVERRIDES_OFF);
+  // Dynamic (KASI) holiday set — empty until the optional Phase-2 refresher in
+  // main() hot-swaps it via setDynamicHolidays. The scheduler reads it live
+  // through the getter, so a refresh applies without a restart. A failed/empty
+  // fetch just leaves this empty and the bundled static set still applies.
+  let kasiHolidays: ReadonlySet<string> = new Set();
+  const isHoliday = makeIsHoliday(extraHolidays, holidaysOff, () => kasiHolidays);
+  const setDynamicHolidays = (dates: ReadonlySet<string>) => {
+    kasiHolidays = dates;
+  };
+  // Fail-open visibility: a single boot line so an operator can spot a stale
+  // static set (e.g. the annual update was forgotten) — noop logger in tests.
+  logger.write({
+    stream: 'ops',
+    level: 'info',
+    occurredAt: new Date().toISOString(),
+    source: 'server',
+    runtime: 'node',
+    category: 'settings',
+    event: 'holiday.config',
+    message: 'holiday auto-skip config loaded',
+    data: {
+      bundledCount: KR_HOLIDAYS.size,
+      maxCoveredYear: maxHolidayYear(),
+      extraHolidays: extraHolidays.size,
+      overridesOff: holidaysOff.size,
+    },
+  });
 
   // videoIds known to be NON-EMBEDDABLE (YouTube error 101/150) live in
   // RoomState.blockedIds (per room) so clients can MARK them in the list and the
@@ -761,7 +832,7 @@ export function createServer(
     for (const code of await store.listRoomCodes()) {
       const rec = await store.get(code);
       if (!rec) continue;
-      const want = scheduleWantsPlay(rec.state.schedule, now);
+      const want = scheduleWantsPlay(rec.state.schedule, now, isHoliday);
       if (want === null) {
         // No/disabled schedule → forget the last edge so re-enabling within the
         // same window still fires a fresh edge.
@@ -792,7 +863,17 @@ export function createServer(
         await broadcastState(code);
       } else if (want === false && rec.state.isPlaying) {
         await store.patchState(code, { isPlaying: false });
-        await roomLog(code, 'schedule', null, { auto: true, action: 'stop' });
+        // skipReason distinguishes a holiday suppression from a normal
+        // window-close (separate key from ActivityEntry's top-level reason).
+        // Only label 'holiday' when the holiday gate is what actually closed it
+        // (skipHolidays on AND a holiday) — not merely because today happens to
+        // be a holiday while a normal window closes.
+        const byHoliday = rec.state.schedule?.skipHolidays === true && isHoliday(now);
+        await roomLog(code, 'schedule', null, {
+          auto: true,
+          action: 'stop',
+          skipReason: byHoliday ? 'holiday' : undefined,
+        });
         await broadcastState(code);
       }
     }
@@ -1576,7 +1657,7 @@ export function createServer(
     });
   });
 
-  return { httpServer, io, tickSchedules, sweepEmptyRooms };
+  return { httpServer, io, tickSchedules, sweepEmptyRooms, setDynamicHolidays };
 }
 
 // Auto-start unless imported (e.g. by tests).
@@ -1636,7 +1717,32 @@ if (isMain) {
       error: err instanceof Error ? { name: err.name, message: err.message } : undefined,
     }),
   );
-  const { httpServer } = createServer(store, undefined, undefined, undefined, logger);
+  const { httpServer, setDynamicHolidays } = createServer(
+    store,
+    undefined,
+    undefined,
+    undefined,
+    logger,
+  );
+
+  // Optional Phase-2 KASI holiday refresher (DATA_GO_KR_SERVICE_KEY). Persists to
+  // .data/holidays.json next to rooms.json and re-fetches only ~yearly (see
+  // ensureFreshHolidays). No key → the bundled static set is used as-is.
+  const holidayCacheFile = path.join(path.dirname(dataFile), 'holidays.json');
+  const refreshHolidays = () =>
+    ensureFreshHolidays({
+      serviceKey: process.env.DATA_GO_KR_SERVICE_KEY?.trim() || undefined,
+      cacheFile: holidayCacheFile,
+      now: new Date(),
+      apply: setDynamicHolidays,
+      logger,
+    }).catch((err) => logProcess('error', 'holiday.refresh_error', String(err), err));
+  void refreshHolidays(); // boot
+  // Low-frequency re-check; only hits KASI when the cache is stale, so API usage
+  // stays ~yearly. unref so it never blocks process/test exit.
+  const holidayTimer = setInterval(refreshHolidays, 12 * 60 * 60 * 1000);
+  holidayTimer.unref();
+
   const port = Number(process.env.PORT ?? 3001);
   const hostname = process.env.HOSTNAME ?? '0.0.0.0';
 

@@ -55,3 +55,10 @@ apps/web (useRoom action).** The contract lives in `docs/SPEC.md`.
 
 See `docs/SPEC.md` (protocol contract), `docs/ARCHITECTURE.md` (structure +
 RoomStore), and `docs/DEPLOYMENT.md`. Do not inline those here.
+
+## 한국어 작성 규칙 (LOAD-BEARING)
+
+사용자에게 **한국어로 산문(설명·안내·답변 등)을 쓸 때마다** `humanize-korean`
+스킬의 규칙을 적용한다 — AI 티(번역체, 어미 반복, 군더더기 관용구, 이모지·볼드
+남발 등)를 걷어내고 사람이 쓴 것처럼 자연스럽게 쓴다. 코드·식별자·고유명사·숫자는
+그대로 둔다.
