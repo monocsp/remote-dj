@@ -68,6 +68,26 @@ export function parseKasiResponse(json: any): Set<string> {
  * or a non-"00" resultCode (e.g. an unregistered/over-quota key) so the caller
  * can fall back to the cache/static set.
  */
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+// data.go.kr's HTTPS gateway intermittently returns 401/5xx on otherwise-valid
+// requests; retry a few times with a short backoff so the once-a-year refresh
+// isn't defeated by transient edge flakiness. A non-401 4xx fails fast.
+async function fetchOk(url: string, fetchImpl: typeof fetch, label: string): Promise<Response> {
+  let status = 0;
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    const res = await fetchImpl(url);
+    if (res.ok) return res;
+    status = res.status;
+    if (attempt < 4 && (res.status === 401 || res.status >= 500)) {
+      await sleep(300 * attempt);
+      continue;
+    }
+    break;
+  }
+  throw new Error(`KASI HTTP ${status} (${label})`);
+}
+
 export async function fetchKasiYear(
   year: number,
   serviceKey: string,
@@ -80,8 +100,7 @@ export async function fetchKasiYear(
     const url =
       `${KASI_BASE}?solYear=${year}&solMonth=${mm}` +
       `&numOfRows=100&_type=json&ServiceKey=${keyParam}`;
-    const res = await fetchImpl(url);
-    if (!res.ok) throw new Error(`KASI HTTP ${res.status} (${year}-${mm})`);
+    const res = await fetchOk(url, fetchImpl, `${year}-${mm}`);
     // biome-ignore lint/suspicious/noExplicitAny: external API shape is dynamic JSON.
     const json: any = await res.json();
     const code = json?.response?.header?.resultCode;
