@@ -7,7 +7,7 @@ export type Role = 'player' | 'controller';
 
 // ── Weekly play schedule ─────────────────────────────────────────────────
 // A room can be auto-started/auto-stopped on a weekly time-of-day schedule.
-// Times are "HH:MM" (24h) in the SERVER's local timezone. Transitions are
+// Times are "HH:MM" (24h) evaluated in Asia/Seoul (KST). Transitions are
 // EDGE-triggered (see docs/SPEC.md §주간 예약) so they never fight manual
 // control mid-window.
 export type DayKey = 'mon' | 'tue' | 'wed' | 'thu' | 'fri' | 'sat' | 'sun';
@@ -21,6 +21,10 @@ export interface DaySchedule {
 export interface WeeklySchedule {
   enabled: boolean;
   days: Record<DayKey, DaySchedule>;
+  // When true, the server suppresses auto-play on Korean public holidays
+  // (관공서의 공휴일, 대체공휴일 포함). Optional + absent ⇒ OFF, so existing
+  // saved schedules and older clients are unaffected until explicitly re-saved.
+  skipHolidays?: boolean;
 }
 
 // ── Playback modes ─────────────────────────────────────────────────────────
