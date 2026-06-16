@@ -88,21 +88,27 @@ export const KR_HOLIDAYS: ReadonlySet<string> = new Set<string>([
   '2027-12-27', // 성탄절 대체공휴일
 ]);
 
+const EMPTY_SET: ReadonlySet<string> = new Set();
+
 /**
  * Build an `isHoliday(now)` predicate from the bundled set plus operator
- * overrides. Effective membership is set algebra on the KST date:
- *   (KR_HOLIDAYS ∪ extra) \ off
+ * overrides and an optional live "dynamic" set (e.g. the KASI API result, read
+ * through a getter so it can be hot-swapped after a refresh). Effective
+ * membership is set algebra on the KST date:
+ *   (KR_HOLIDAYS ∪ dynamic ∪ extra) \ off
  * `extra` force-adds dates (e.g. a freshly-gazetted 임시공휴일); `off`
- * force-cancels them (play through a date anyway). A miss in either env can
- * never delete a baseline holiday except via `off`.
+ * force-cancels them (play through a date anyway). A miss in `dynamic`/`extra`
+ * can never delete a baseline holiday except via `off`, so a failed/empty KASI
+ * fetch only ever falls back to the bundled set — never corrupts it.
  */
 export function makeIsHoliday(
-  extra: ReadonlySet<string> = new Set(),
-  off: ReadonlySet<string> = new Set(),
+  extra: ReadonlySet<string> = EMPTY_SET,
+  off: ReadonlySet<string> = EMPTY_SET,
+  dynamic: () => ReadonlySet<string> = () => EMPTY_SET,
 ): (now: Date) => boolean {
   return (now: Date) => {
     const key = kstParts(now).date;
-    return (KR_HOLIDAYS.has(key) || extra.has(key)) && !off.has(key);
+    return (KR_HOLIDAYS.has(key) || dynamic().has(key) || extra.has(key)) && !off.has(key);
   };
 }
 

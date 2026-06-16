@@ -47,6 +47,7 @@ import {
 import { nanoid } from 'nanoid';
 import { Server } from 'socket.io';
 import { KR_HOLIDAYS, isYmd, kstParts, makeIsHoliday, maxHolidayYear } from './holidays.js';
+import { ensureFreshHolidays } from './kasiHolidays.js';
 import { type Logger, createLogger, createNoopLogger } from './logger.js';
 import { PersistentRoomStore } from './persistentStore.js';
 import { InMemoryRoomStore, type RoomStore } from './store.js';
@@ -390,6 +391,8 @@ export function createServer(
   // callers that only destructure { httpServer, io } are unaffected.
   tickSchedules: (now: Date) => Promise<void>;
   sweepEmptyRooms: (now?: number) => Promise<void>;
+  // Hot-swap the dynamic (KASI) holiday set; main() wires the Phase-2 refresher.
+  setDynamicHolidays: (dates: ReadonlySet<string>) => void;
 } {
   const httpServer = createHttpServer((req, res) => {
     if (req.url === '/health') {
@@ -603,7 +606,15 @@ export function createServer(
   };
   const extraHolidays = parseDateSet('EXTRA_HOLIDAYS', process.env.EXTRA_HOLIDAYS);
   const holidaysOff = parseDateSet('HOLIDAY_OVERRIDES_OFF', process.env.HOLIDAY_OVERRIDES_OFF);
-  const isHoliday = makeIsHoliday(extraHolidays, holidaysOff);
+  // Dynamic (KASI) holiday set — empty until the optional Phase-2 refresher in
+  // main() hot-swaps it via setDynamicHolidays. The scheduler reads it live
+  // through the getter, so a refresh applies without a restart. A failed/empty
+  // fetch just leaves this empty and the bundled static set still applies.
+  let kasiHolidays: ReadonlySet<string> = new Set();
+  const isHoliday = makeIsHoliday(extraHolidays, holidaysOff, () => kasiHolidays);
+  const setDynamicHolidays = (dates: ReadonlySet<string>) => {
+    kasiHolidays = dates;
+  };
   // Fail-open visibility: a single boot line so an operator can spot a stale
   // static set (e.g. the annual update was forgotten) — noop logger in tests.
   logger.write({
@@ -1646,7 +1657,7 @@ export function createServer(
     });
   });
 
-  return { httpServer, io, tickSchedules, sweepEmptyRooms };
+  return { httpServer, io, tickSchedules, sweepEmptyRooms, setDynamicHolidays };
 }
 
 // Auto-start unless imported (e.g. by tests).
@@ -1706,7 +1717,32 @@ if (isMain) {
       error: err instanceof Error ? { name: err.name, message: err.message } : undefined,
     }),
   );
-  const { httpServer } = createServer(store, undefined, undefined, undefined, logger);
+  const { httpServer, setDynamicHolidays } = createServer(
+    store,
+    undefined,
+    undefined,
+    undefined,
+    logger,
+  );
+
+  // Optional Phase-2 KASI holiday refresher (DATA_GO_KR_SERVICE_KEY). Persists to
+  // .data/holidays.json next to rooms.json and re-fetches only ~yearly (see
+  // ensureFreshHolidays). No key → the bundled static set is used as-is.
+  const holidayCacheFile = path.join(path.dirname(dataFile), 'holidays.json');
+  const refreshHolidays = () =>
+    ensureFreshHolidays({
+      serviceKey: process.env.DATA_GO_KR_SERVICE_KEY?.trim() || undefined,
+      cacheFile: holidayCacheFile,
+      now: new Date(),
+      apply: setDynamicHolidays,
+      logger,
+    }).catch((err) => logProcess('error', 'holiday.refresh_error', String(err), err));
+  void refreshHolidays(); // boot
+  // Low-frequency re-check; only hits KASI when the cache is stale, so API usage
+  // stays ~yearly. unref so it never blocks process/test exit.
+  const holidayTimer = setInterval(refreshHolidays, 12 * 60 * 60 * 1000);
+  holidayTimer.unref();
+
   const port = Number(process.env.PORT ?? 3001);
   const hostname = process.env.HOSTNAME ?? '0.0.0.0';
 
