@@ -33,7 +33,8 @@ export function kstParts(now: Date): KstParts {
 // Statutory KR public holidays (관공서의 공휴일에 관한 규정) as KST "YYYY-MM-DD",
 // INCLUDING 대체공휴일. Lunar holidays (설날/추석/부처님오신날) are pre-resolved to
 // their solar dates. Web-verified for 2026 & 2027 against the KASI 월력요항 plus
-// multiple Korean calendar references.
+// multiple Korean calendar references. (제헌절 7/17 was re-instated as a public
+// holiday from 2026 — law passed 2026-01-29 — and gains a 대체공휴일 from 2027.)
 //
 // ⚠️ ANNUAL UPDATE: append the next year's dates before December (a unit test
 // fails once the set stops covering the current year). Ad-hoc 임시공휴일 and
@@ -52,6 +53,7 @@ export const KR_HOLIDAYS: ReadonlySet<string> = new Set<string>([
   '2026-05-25', // 부처님오신날 대체공휴일
   '2026-06-03', // 제9회 전국동시지방선거 (선거일, 1회성)
   '2026-06-06', // 현충일
+  '2026-07-17', // 제헌절 (금) — 2026 재지정 공휴일 (2026-01-29 법 통과, 시행 2026)
   '2026-08-15', // 광복절 (토)
   '2026-08-17', // 광복절 대체공휴일
   '2026-09-24', // 추석 연휴 (전날)
@@ -71,6 +73,8 @@ export const KR_HOLIDAYS: ReadonlySet<string> = new Set<string>([
   '2027-05-05', // 어린이날
   '2027-05-13', // 부처님오신날
   '2027-06-06', // 현충일 (일 — 법상 대체 없음)
+  '2027-07-17', // 제헌절 (토)
+  '2027-07-19', // 제헌절 대체공휴일 (제헌절 대체는 2027부터 적용)
   '2027-08-15', // 광복절 (일)
   '2027-08-16', // 광복절 대체공휴일
   '2027-09-14', // 추석 연휴 (전날)
@@ -100,6 +104,20 @@ export function makeIsHoliday(
     const key = kstParts(now).date;
     return (KR_HOLIDAYS.has(key) || extra.has(key)) && !off.has(key);
   };
+}
+
+/**
+ * True iff `s` is a real "YYYY-MM-DD" date that round-trips (rejects
+ * "2026-7-17" without zero-pad and impossible dates like "2026-13-40"). Used to
+ * validate the EXTRA_HOLIDAYS / HOLIDAY_OVERRIDES_OFF env levers so a typo is
+ * surfaced rather than silently ignored (a non-padded date never matches the
+ * always-padded kstParts().date key).
+ */
+export function isYmd(s: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
+  const [y, m, d] = s.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d;
 }
 
 /** Latest calendar year covered by the bundled static set (staleness guard). */

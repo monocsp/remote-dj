@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { KR_HOLIDAYS, kstParts, makeIsHoliday, maxHolidayYear } from './holidays.js';
+import { KR_HOLIDAYS, isYmd, kstParts, makeIsHoliday, maxHolidayYear } from './holidays.js';
 
 describe('kstParts (Asia/Seoul, fixed +09:00)', () => {
   it('resolves the KST calendar date across the midnight boundary', () => {
@@ -34,14 +34,31 @@ describe('KR_HOLIDAYS static set', () => {
     expect(KR_HOLIDAYS.has('2026-06-04')).toBe(false);
   });
 
+  it('includes 제헌절 (re-instated 2026) with its 2027 substitute', () => {
+    expect(KR_HOLIDAYS.has('2026-07-17')).toBe(true); // 제헌절 (금), 대체 없음
+    expect(KR_HOLIDAYS.has('2027-07-17')).toBe(true); // 제헌절 (토)
+    expect(KR_HOLIDAYS.has('2027-07-19')).toBe(true); // 대체공휴일 (월)
+    expect(KR_HOLIDAYS.has('2026-07-18')).toBe(false); // 2026엔 대체 없음
+  });
+
   it('does NOT add a Monday substitute for 2026 추석 (ends Sat, no Sunday overlap)', () => {
     expect(KR_HOLIDAYS.has('2026-09-28')).toBe(false);
   });
 
-  it('covers at least the current calendar year (annual-update staleness guard)', () => {
-    // Fails once the bundled set stops covering "now" — i.e. the yearly update
-    // was forgotten. Uses the real clock deliberately.
-    expect(maxHolidayYear()).toBeGreaterThanOrEqual(new Date().getUTCFullYear());
+  it('covers the current AND next calendar year (annual-update guard w/ lead time)', () => {
+    // Requires next-year coverage so the bundle is updated ~a year early, not on
+    // Jan 1 with zero lead. Fails once the set stops covering now+1.
+    expect(maxHolidayYear()).toBeGreaterThanOrEqual(new Date().getUTCFullYear() + 1);
+  });
+});
+
+describe('isYmd', () => {
+  it('accepts a real zero-padded date and rejects malformed/impossible ones', () => {
+    expect(isYmd('2026-07-17')).toBe(true);
+    expect(isYmd('2026-7-17')).toBe(false); // not zero-padded → never matches the key
+    expect(isYmd('2026-13-40')).toBe(false); // impossible
+    expect(isYmd('not-a-date')).toBe(false);
+    expect(isYmd('2026/07/17')).toBe(false);
   });
 });
 
