@@ -1,5 +1,7 @@
 # remote-dj
 
+> 만든 이유: 한 대의 폰으로 음악을 틀 때 여러 사람이 각자 폰에서 곡을 바꾸고 싶어서 만들었습니다.
+
 > 여러 사람이 **한 대의 재생용 폰**에서 흐르는 YouTube 음악을 원격으로 함께 조작하는 협업형 음악 컨트롤러.
 
 [![CI](https://github.com/monocsp/remote-dj/actions/workflows/ci.yml/badge.svg)](https://github.com/monocsp/remote-dj/actions/workflows/ci.yml)
@@ -15,8 +17,6 @@
 "왜 이 곡으로 바꿨는지 / 왜 소리를 줄였는지"를 다른 사람이 확인할 수 있다.
 서버는 셀프호스트(컴퓨터 또는 안드로이드 Termux)로 누구나 포크해 돌릴 수 있다.
 
-![demo](docs/demo.gif)
-<!-- [TODO] 데모 GIF/스크린샷 추가 (랜딩 → 방 입장 → 곡 변경 → 실시간 동기화가 보이도록) -->
 
 ## ✨ Features
 
@@ -202,3 +202,8 @@ CI(GitHub Actions)는 계약 드리프트 검사 → typecheck → Biome → ESL
 ## 📄 License
 
 [MIT](./LICENSE) © 2026 monocsp
+
+## 배운 점
+
+- 여러 기기의 재생 상태를 실시간으로 맞추려고 WebSocket으로 동기화했습니다.
+- 제목·재생시간은 YouTube 비공식 API에 의존해 언제든 실패할 수 있어, 실패해도 재생에는 영향이 없도록 처리했습니다.
